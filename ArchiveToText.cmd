@@ -10,10 +10,11 @@ if not exist "%PS_SCRIPT%" (
 )
 
 where pwsh.exe >nul 2>nul
-if %ERRORLEVEL% EQU 0 (
-    pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
-    exit /b %ERRORLEVEL%
-)
+if %ERRORLEVEL% NEQ 0 goto use_posh
 
+pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
+exit /b %ERRORLEVEL%
+
+:use_posh
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" %*
 exit /b %ERRORLEVEL%
