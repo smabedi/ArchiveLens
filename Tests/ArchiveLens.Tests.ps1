@@ -390,12 +390,16 @@ Describe 'ArchiveLens Core Functionality' {
             )
 
             $pwshExe = (Get-Process -Id $PID).Path
-            & $pwshExe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $script:CliScriptPath $zipPath | Out-Null
-            $LASTEXITCODE | Should -Be 0
 
-            # Second run without -Force should fail with exit code 1 because output file now exists
-            & $pwshExe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $script:CliScriptPath $zipPath 2> $null | Out-Null
-            $LASTEXITCODE | Should -Be 1
+            # Run 1: Should Succeed
+            $args1 = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:CliScriptPath, $zipPath)
+            $p1 = Start-Process -FilePath $pwshExe -ArgumentList $args1 -Wait -NoNewWindow -PassThru
+            $p1.ExitCode | Should -Be 0
+
+            # Run 2: Should Fail (file already exists, no -Force)
+            $args2 = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:CliScriptPath, $zipPath)
+            $p2 = Start-Process -FilePath $pwshExe -ArgumentList $args2 -Wait -NoNewWindow -PassThru
+            $p2.ExitCode | Should -Be 1
         }
     }
 }
