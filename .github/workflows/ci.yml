@@ -45,6 +45,7 @@ jobs:
               exit /b 1
           )
           echo CMD wrapper exit code propagation verified.
+          exit /b 0
 
   test-powershell:
     name: Test on Windows (Windows PowerShell 5.1)
@@ -81,6 +82,7 @@ jobs:
               exit /b 1
           )
           echo CMD wrapper exit code propagation verified.
+          exit /b 0
 
   release:
     name: Publish GitHub Release
