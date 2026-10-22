@@ -5,6 +5,27 @@ All notable changes to **ArchiveLens** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-22
+
+### Added
+
+- Built-in `Uninstall-ArchiveLens` cmdlet exported by the module, enabling full or version-targeted uninstallation
+  directly from any PowerShell session without needing the original release `Install.ps1` script.
+- Side-by-side semantic versioned installation layout (`Modules\ArchiveLens\<Version>\` without a `v` folder prefix).
+- Installation version management switches in `Install.ps1`:
+    - `-CleanInstall`: Installs the current version and removes all other version folders.
+    - `-RemoveOlderVersions`: Installs the current version and removes only version folders strictly older than the
+      current version.
+- Granular uninstallation filters in both `Uninstall-ArchiveLens` and `Install.ps1 -Uninstall`:
+    - `-TargetVersion <String>`: Removes only the matching version folder.
+    - `-RemoveOlderThan <String>`: Removes version folders strictly less than the target version.
+    - `-RemoveOlderThanOrEqualTo <String>`: Removes version folders less than or equal to the target version.
+- Automatic version string sanitization (strips leading `v`/`V` prefixes and compares versions accurately via
+  `[System.Version]`).
+- Automatic cleanup of the shared CLI launcher (`%LOCALAPPDATA%\Programs\ArchiveLens\bin`) and User `PATH` entry when
+  targeted uninstallation removes the last remaining version on the system, or automatic synchronization of the CLI
+  launcher to the highest remaining version when other versions remain.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added

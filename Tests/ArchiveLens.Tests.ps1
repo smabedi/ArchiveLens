@@ -23,6 +23,7 @@ BeforeAll {
     $script:ManifestPath = Join-Path -Path $script:RepoRoot -ChildPath 'ArchiveLens.psd1'
     $script:CliScriptPath = Join-Path -Path $script:RepoRoot -ChildPath 'ArchiveToText.ps1'
     $script:CmdLauncherPath = Join-Path -Path $script:RepoRoot -ChildPath 'ArchiveToText.cmd'
+    $script:InstallScriptPath = Join-Path -Path $script:RepoRoot -ChildPath 'Install.ps1'
 
     Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
     Add-Type -AssemblyName System.IO.Compression
@@ -636,6 +637,189 @@ Describe 'ArchiveLens Core Functionality' {
             $args2 = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script:CliScriptPath`"", "`"$zipPath`"")
             $p2 = Start-Process -FilePath $pwshExe -ArgumentList $args2 -Wait -NoNewWindow -PassThru
             $p2.ExitCode | Should -Be 1
+        }
+    }
+
+    Context 'Installer Side-by-Side Versioning and Uninstallation (Install.ps1)' {
+        BeforeEach {
+            $script:MockModRootPS7 = Join-Path $script:WorkDir 'MockModules\PowerShell\Modules\ArchiveLens'
+            $script:MockModRootPS5 = Join-Path $script:WorkDir 'MockModules\WindowsPowerShell\Modules\ArchiveLens'
+            $script:MockModuleRoots = @($script:MockModRootPS7, $script:MockModRootPS5)
+            $script:MockCliRoot = Join-Path $script:WorkDir 'MockPrograms\ArchiveLens'
+            $script:MockCliBin = Join-Path $script:MockCliRoot 'bin'
+
+            function New-MockInstalledVersion
+            {
+                param(
+                    [Parameter(Mandatory = $true)]
+                    [string]$VersionString
+                )
+                foreach ($root in $script:MockModuleRoots)
+                {
+                    $verDir = Join-Path -Path $root -ChildPath $VersionString
+                    [void][System.IO.Directory]::CreateDirectory($verDir)
+                    $psd1Content = "@{`n    RootModule = 'ArchiveLens.psm1'`n    ModuleVersion = '$VersionString'`n}`n"
+                    [System.IO.File]::WriteAllText((Join-Path $verDir 'ArchiveLens.psd1'), $psd1Content)
+                    foreach ($f in @('ArchiveLens.psm1', 'ArchiveToText.ps1', 'ArchiveToText.cmd', 'README.md', 'LICENSE.txt'))
+                    {
+                        Copy-Item -LiteralPath (Join-Path $script:RepoRoot $f) -Destination (Join-Path $verDir $f) -Force
+                    }
+                }
+            }
+        }
+
+        It 'Default Install: installs 0.3.0 into <ModuleRoot>\0.3.0 without touching existing version folders' {
+            New-MockInstalledVersion -VersionString '0.1.0'
+            New-MockInstalledVersion -VersionString '0.2.0'
+            New-MockInstalledVersion -VersionString '1.0.0'
+
+            & $script:InstallScriptPath -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath (Join-Path $root '0.1.0\ArchiveLens.psd1')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root '0.2.0\ArchiveLens.psd1')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root '0.3.0\ArchiveLens.psd1')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root '1.0.0\ArchiveLens.psd1')) | Should -BeTrue
+            }
+            (Test-Path -LiteralPath (Join-Path $script:MockCliBin 'ArchiveToText.cmd')) | Should -BeTrue
+        }
+
+        It '-CleanInstall: installs 0.3.0 and deletes all other older and newer version folders' {
+            New-MockInstalledVersion -VersionString '0.1.0'
+            New-MockInstalledVersion -VersionString '0.2.0'
+            New-MockInstalledVersion -VersionString '1.0.0'
+
+            & $script:InstallScriptPath -CleanInstall -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '1.0.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.3.0\ArchiveLens.psd1')) | Should -BeTrue
+            }
+        }
+
+        It '-RemoveOlderVersions: installs 0.3.0, deletes older versions (0.1.0, 0.2.0), and preserves newer versions (1.0.0)' {
+            New-MockInstalledVersion -VersionString '0.1.0'
+            New-MockInstalledVersion -VersionString '0.2.0'
+            New-MockInstalledVersion -VersionString '1.0.0'
+
+            & $script:InstallScriptPath -RemoveOlderVersions -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.3.0\ArchiveLens.psd1')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root '1.0.0\ArchiveLens.psd1')) | Should -BeTrue
+            }
+        }
+
+        It '-Uninstall -TargetVersion: accepts v/V prefix and deletes only the exact version while keeping CLI when versions remain' {
+            & $script:InstallScriptPath -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            New-MockInstalledVersion -VersionString '0.1.0'
+            New-MockInstalledVersion -VersionString '0.2.0'
+
+            & $script:InstallScriptPath -Uninstall -TargetVersion 'v0.2.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+            }
+            (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
+        }
+
+        It '-Uninstall -RemoveOlderThan: compares via [System.Version] (e.g. 0.2.0 < 0.10.0) and strips leading V' {
+            & $script:InstallScriptPath -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            New-MockInstalledVersion -VersionString '0.1.0'
+            New-MockInstalledVersion -VersionString '0.2.0'
+            New-MockInstalledVersion -VersionString '0.10.0'
+
+            & $script:InstallScriptPath -Uninstall -RemoveOlderThan 'V0.3.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root '0.10.0')) | Should -BeTrue
+            }
+            (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
+        }
+
+        It '-Uninstall -RemoveOlderThanOrEqualTo: deletes versions <= target and automatically removes CLI root when zero versions remain' {
+            & $script:InstallScriptPath -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            New-MockInstalledVersion -VersionString '0.1.0'
+            New-MockInstalledVersion -VersionString '0.2.0'
+
+            # First remove <= 0.2.0 (0.3.0 still remains)
+            & $script:InstallScriptPath -Uninstall -RemoveOlderThanOrEqualTo 'v0.2.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+            }
+            (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
+
+            # Now remove target 0.3.0 -> zero versions remain -> CLI root must be automatically removed
+            & $script:InstallScriptPath -Uninstall -TargetVersion '0.3.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath $root) | Should -BeFalse
+            }
+            (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeFalse
+        }
+
+        It 'Default -Uninstall: removes all module roots and shared CLI directory immediately' {
+            & $script:InstallScriptPath -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            New-MockInstalledVersion -VersionString '0.1.0'
+
+            & $script:InstallScriptPath -Uninstall -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath $root) | Should -BeFalse
+            }
+            (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeFalse
+        }
+
+        It 'Throws an ArgumentException when an invalid version string is passed' {
+            {
+                & $script:InstallScriptPath -Uninstall -TargetVersion 'vNotAVersion' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            } | Should -Throw '*Invalid semantic version*'
+        }
+
+        It 'Built-in Uninstall-ArchiveLens cmdlet supports targeted pruning and full teardown without external scripts' {
+            & $script:InstallScriptPath -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            New-MockInstalledVersion -VersionString '0.1.0'
+            New-MockInstalledVersion -VersionString '0.2.0'
+
+            # 1. Remove older than 0.2.0 (deletes 0.1.0, keeps 0.2.0 and 0.3.0)
+            Uninstall-ArchiveLens -RemoveOlderThan 'v0.2.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath -KeepLoadedSession -Confirm:$false
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
+                (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+            }
+            (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
+
+            # 2. Remove <= 0.3.0 (deletes remaining 0.2.0 and 0.3.0 -> zero versions remain -> auto-cleans CLI root)
+            Uninstall-ArchiveLens -RemoveOlderThanOrEqualTo 'V0.3.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath -KeepLoadedSession -Confirm:$false
+
+            foreach ($root in $script:MockModuleRoots)
+            {
+                (Test-Path -LiteralPath $root) | Should -BeFalse
+            }
+            (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeFalse
         }
     }
 }
