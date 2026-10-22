@@ -10,7 +10,7 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
 
 #region Constants & Known Classifications
 
-$script:ModuleVersion = '0.2.0'
+$script:ModuleVersion = '0.3.0'
 
 $script:ExitCodeSuccess = 0
 $script:ExitCodeFatalError = 1
@@ -2205,8 +2205,489 @@ function Convert-ArchiveToText
     }
 }
 
+#region Module Uninstallation & Lifecycle Helpers
+
+$script:ModulePackageFiles = @(
+    'ArchiveLens.psd1',
+    'ArchiveLens.psm1',
+    'ArchiveToText.ps1',
+    'ArchiveToText.cmd',
+    'README.md',
+    'LICENSE.txt'
+)
+
+function ConvertTo-ArchiveLensCleanVersion
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$InputVersion,
+
+        [Parameter()]
+        [string]$ParameterName = 'Version'
+    )
+
+    if ([string]::IsNullOrWhiteSpace($InputVersion))
+    {
+        throw [System.ArgumentException]::new("The version value supplied to -$ParameterName cannot be empty or whitespace.")
+    }
+
+    $sanitized = $InputVersion.Trim().Trim('"').Trim("'")
+    $sanitized = $sanitized -replace '^[vV]+', ''
+
+    [version]$parsedVersion = $null
+    if (-not [version]::TryParse($sanitized, [ref]$parsedVersion))
+    {
+        throw [System.ArgumentException]::new(
+                "Invalid semantic version '$InputVersion' supplied to -$ParameterName. Expected format like '0.3.0' or 'v0.3.0'."
+        )
+    }
+
+    return $parsedVersion
+}
+
+function Get-ArchiveLensNormalizedPathEntry
+{
+    param([string]$Entry)
+    if ([string]::IsNullOrWhiteSpace($Entry))
+    {
+        return ''
+    }
+    return $Entry.Trim().Trim('"').TrimEnd('\', '/')
+}
+
+function Get-ArchiveLensInstalledVersionDirectories
+{
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ModuleRootPath
+    )
+
+    if (-not (Test-Path -LiteralPath $ModuleRootPath -PathType Container))
+    {
+        return @()
+    }
+
+    $results = [System.Collections.Generic.List[PSCustomObject]]::new()
+    $subDirs = @(Get-ChildItem -LiteralPath $ModuleRootPath -Directory -Force -ErrorAction SilentlyContinue)
+
+    foreach ($dir in $subDirs)
+    {
+        $cleanName = $dir.Name -replace '^[vV]+', ''
+        [version]$ver = $null
+        if ([version]::TryParse($cleanName, [ref]$ver))
+        {
+            $results.Add([PSCustomObject]@{
+                FolderName = $dir.Name
+                FullPath   = $dir.FullName
+                Version    = $ver
+            })
+        }
+    }
+
+    return @($results | Sort-Object -Property Version)
+}
+
+function Remove-ArchiveLensLegacyRootFiles
+{
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ModuleRootPath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$FileNames
+    )
+
+    if (-not (Test-Path -LiteralPath $ModuleRootPath -PathType Container))
+    {
+        return
+    }
+
+    foreach ($fName in $FileNames)
+    {
+        $legacyFile = Join-Path -Path $ModuleRootPath -ChildPath $fName
+        if (Test-Path -LiteralPath $legacyFile -PathType Leaf)
+        {
+            if ($PSCmdlet.ShouldProcess($legacyFile, 'Remove legacy flat module file'))
+            {
+                Remove-Item -LiteralPath $legacyFile -Force
+            }
+        }
+    }
+}
+
+function Invoke-ArchiveLensVersionPruning
+{
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$TargetModuleRoots,
+
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ShouldRemovePredicate,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ReasonDescription
+    )
+
+    $removedCount = 0
+
+    foreach ($modRoot in $TargetModuleRoots)
+    {
+        if (-not (Test-Path -LiteralPath $modRoot -PathType Container))
+        {
+            continue
+        }
+
+        $installedVerDirs = @(Get-ArchiveLensInstalledVersionDirectories -ModuleRootPath $modRoot)
+        foreach ($item in $installedVerDirs)
+        {
+            [version]$installedVer = $item.Version
+            $shouldDelete = & $ShouldRemovePredicate $installedVer
+
+            if ($shouldDelete)
+            {
+                if ($PSCmdlet.ShouldProcess($item.FullPath, "Remove version $($item.FolderName) ($ReasonDescription)"))
+                {
+                    Remove-Item -LiteralPath $item.FullPath -Recurse -Force
+                    Write-Host "Removed version $($item.FolderName): $($item.FullPath)" -ForegroundColor Green
+                    $removedCount++
+                }
+            }
+        }
+
+        if (Test-Path -LiteralPath $modRoot -PathType Container)
+        {
+            $remainingItems = @(Get-ChildItem -LiteralPath $modRoot -Force -ErrorAction SilentlyContinue)
+            if ($remainingItems.Count -eq 0)
+            {
+                if ($PSCmdlet.ShouldProcess($modRoot, 'Remove empty module root directory'))
+                {
+                    Remove-Item -LiteralPath $modRoot -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    return $removedCount
+}
+
+function Remove-ArchiveLensSharedCliAndPath
+{
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CliRootDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CliBinDirectory,
+
+        [Parameter()]
+        [switch]$SkipEnv
+    )
+
+    if (Test-Path -LiteralPath $CliRootDirectory -PathType Container)
+    {
+        if ($PSCmdlet.ShouldProcess($CliRootDirectory, 'Remove CLI launcher directory'))
+        {
+            Remove-Item -LiteralPath $CliRootDirectory -Recurse -Force
+            Write-Host "Removed CLI directory: $CliRootDirectory" -ForegroundColor Green
+        }
+    }
+
+    if (-not $SkipEnv)
+    {
+        $currentUserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+        if (-not [string]::IsNullOrWhiteSpace($currentUserPath))
+        {
+            $normTarget = Get-ArchiveLensNormalizedPathEntry -Entry $CliBinDirectory
+            $entries = @($currentUserPath -split ';' | Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_) -and
+                        -not [string]::Equals((Get-ArchiveLensNormalizedPathEntry -Entry $_), $normTarget, [System.StringComparison]::OrdinalIgnoreCase)
+            }
+            )
+            $newPath = $entries -join ';'
+            if ($newPath -ne $currentUserPath)
+            {
+                if ($PSCmdlet.ShouldProcess('HKCU\Environment\Path', "Remove '$CliBinDirectory' from User PATH"))
+                {
+                    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+                    Write-Host "Removed '$CliBinDirectory' from User PATH." -ForegroundColor Green
+                }
+            }
+        }
+    }
+}
+
+function Sync-ArchiveLensCliWithHighestRemainingVersion
+{
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory = $true)]
+        [PSCustomObject]$HighestVersionDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CliBinDirectory,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$FileNames
+    )
+
+    if (-not (Test-Path -LiteralPath $CliBinDirectory -PathType Container))
+    {
+        return
+    }
+
+    $cliManifest = Join-Path -Path $CliBinDirectory -ChildPath 'ArchiveLens.psd1'
+    $needsSync = $true
+
+    if (Test-Path -LiteralPath $cliManifest -PathType Leaf)
+    {
+        try
+        {
+            $cliData = Import-PowerShellDataFile -Path $cliManifest -ErrorAction Stop
+            [version]$cliVer = ConvertTo-ArchiveLensCleanVersion -InputVersion ([string]$cliData['ModuleVersion'])
+            if ($cliVer -eq $HighestVersionDirectory.Version)
+            {
+                $needsSync = $false
+            }
+        }
+        catch
+        {
+            $needsSync = $true
+        }
+    }
+
+    if ($needsSync)
+    {
+        if ($PSCmdlet.ShouldProcess($CliBinDirectory, "Synchronize CLI launcher to highest remaining version ($($HighestVersionDirectory.FolderName))"))
+        {
+            Remove-Item -LiteralPath "$CliBinDirectory\*" -Recurse -Force -ErrorAction SilentlyContinue
+            foreach ($file in $FileNames)
+            {
+                $src = Join-Path -Path $HighestVersionDirectory.FullPath -ChildPath $file
+                $dst = Join-Path -Path $CliBinDirectory -ChildPath $file
+                if (Test-Path -LiteralPath $src -PathType Leaf)
+                {
+                    Copy-Item -LiteralPath $src -Destination $dst -Force
+                }
+            }
+            Write-Host "Synchronized CLI launcher to highest remaining version ($($HighestVersionDirectory.FolderName))." -ForegroundColor Cyan
+        }
+    }
+}
+
+function Uninstall-ArchiveLens
+{
+    <#
+    .SYNOPSIS
+    Uninstalls ArchiveLens (all versions or targeted semantic versions) directly from PowerShell without needing the original release installer.
+
+    .DESCRIPTION
+    Removes installed ArchiveLens module version folders from the current user's PowerShell 7 and Windows PowerShell 5.1
+    module directories. When all versions are removed (either via default full uninstall or when targeted version pruning
+    leaves zero versions remaining on disk), automatically removes the shared CMD CLI launcher (%LOCALAPPDATA%\Programs\ArchiveLens)
+    and cleans up the current user's PATH environment variable.
+
+    .PARAMETER TargetVersion
+    Deletes only the exact specified version folder (e.g., "0.2.0" or "v0.2.0").
+
+    .PARAMETER RemoveOlderThan
+    Evaluates all existing version folders and deletes those strictly older than the specified version.
+
+    .PARAMETER RemoveOlderThanOrEqualTo
+    Evaluates all existing version folders and deletes those older than or equal to the specified version.
+
+    .PARAMETER InstallRoot
+    Custom installation root for the CMD launcher. Defaults to $env:LOCALAPPDATA\Programs\ArchiveLens.
+
+    .PARAMETER ModuleRoots
+    Optional override for the PowerShell module root directories. Defaults to the current user's PowerShell 7 and Windows PowerShell 5.1 module directories.
+
+    .PARAMETER SkipEnvironmentPath
+    Skips reading or modifying the persistent HKCU User PATH environment variable (useful for isolated automated testing).
+
+    .PARAMETER KeepLoadedSession
+    Prevents automatically unloading ArchiveLens from the current PowerShell session when no installed versions remain.
+
+    .EXAMPLE
+    Uninstall-ArchiveLens
+
+    Removes all installed versions of ArchiveLens, deletes the CLI launcher, and removes the User PATH entry.
+
+    .EXAMPLE
+    Uninstall-ArchiveLens -TargetVersion v0.1.0
+
+    Removes only version 0.1.0. If no other versions remain, also cleans up the CLI launcher and User PATH.
+
+    .EXAMPLE
+    Uninstall-ArchiveLens -RemoveOlderThan 0.3.0
+
+    Removes all installed versions strictly older than 0.3.0.
+
+    .EXAMPLE
+    Uninstall-ArchiveLens -RemoveOlderThanOrEqualTo v0.2.0
+
+    Removes all installed versions older than or equal to 0.2.0.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+    param(
+        [Parameter()]
+        [string]$TargetVersion,
+
+        [Parameter()]
+        [string]$RemoveOlderThan,
+
+        [Parameter()]
+        [string]$RemoveOlderThanOrEqualTo,
+
+        [Parameter()]
+        [string]$InstallRoot = (Join-Path -Path $env:LOCALAPPDATA -ChildPath 'Programs\ArchiveLens'),
+
+        [Parameter()]
+        [string[]]$ModuleRoots,
+
+        [Parameter()]
+        [switch]$SkipEnvironmentPath,
+
+        [Parameter()]
+        [switch]$KeepLoadedSession
+    )
+
+    $filterCount = 0
+    if ($PSBoundParameters.ContainsKey('TargetVersion'))            {$filterCount++ }
+    if ($PSBoundParameters.ContainsKey('RemoveOlderThan'))          {$filterCount++ }
+    if ($PSBoundParameters.ContainsKey('RemoveOlderThanOrEqualTo')) {$filterCount++ }
+
+    if ($filterCount -gt 1)
+    {
+        throw [System.ArgumentException]::new(
+                "Specify only one version filter: -TargetVersion, -RemoveOlderThan, or -RemoveOlderThanOrEqualTo."
+        )
+    }
+
+    $usingDefaultModuleRoots = $false
+    if ($null -ne $ModuleRoots -and $ModuleRoots.Count -gt 0) {
+        $targetRoots = @($ModuleRoots | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    }
+    else
+    {
+        $usingDefaultModuleRoots = $true
+        $documentsDir = [Environment]::GetFolderPath('MyDocuments')
+        $targetRoots = @(
+            (Join-Path -Path $documentsDir -ChildPath 'PowerShell\Modules\ArchiveLens'), (Join-Path -Path $documentsDir -ChildPath 'WindowsPowerShell\Modules\ArchiveLens')
+        ) | Select-Object -Unique
+    }
+
+    $cliBinDir = Join-Path -Path $InstallRoot -ChildPath 'bin'
+
+    # Case 1: Default Global Uninstall (all versions)
+    if ($filterCount -eq 0)
+    {
+        Write-Host "Uninstalling all versions of ArchiveLens..." -ForegroundColor Cyan
+
+        foreach ($modRoot in $targetRoots)
+        {
+            if (Test-Path -LiteralPath $modRoot -PathType Container)
+            {
+                if ($PSCmdlet.ShouldProcess($modRoot, 'Remove PowerShell module root directory (all versions)'))
+                {
+                    Remove-Item -LiteralPath $modRoot -Recurse -Force
+                    Write-Host "Removed module directory: $modRoot" -ForegroundColor Green
+                }
+            }
+        }
+
+        Remove-ArchiveLensSharedCliAndPath -CliRootDirectory $InstallRoot -CliBinDirectory $cliBinDir -SkipEnv:$SkipEnvironmentPath
+        Write-Host "ArchiveLens uninstallation complete." -ForegroundColor Green
+
+        if ($usingDefaultModuleRoots -and -not $KeepLoadedSession -and -not $WhatIfPreference)
+        {
+            Remove-Module -Name 'ArchiveLens' -Force -ErrorAction SilentlyContinue
+        }
+        return
+    }
+
+    # Cases 2, 3, 4: Targeted Version Uninstallation
+    [scriptblock]$predicate = $null
+    $reasonText = ''
+
+    if ($PSBoundParameters.ContainsKey('TargetVersion'))
+    {
+        [version]$targetVer = ConvertTo-ArchiveLensCleanVersion -InputVersion $TargetVersion -ParameterName 'TargetVersion'
+        $reasonText = "TargetVersion == $targetVer"
+        $predicate = { param([version]$installedVer) $installedVer -eq $targetVer }.GetNewClosure()
+        Write-Host "Uninstalling ArchiveLens version $targetVer..." -ForegroundColor Cyan
+    }
+    elseif ($PSBoundParameters.ContainsKey('RemoveOlderThan'))
+    {
+        [version]$targetVer = ConvertTo-ArchiveLensCleanVersion -InputVersion $RemoveOlderThan -ParameterName 'RemoveOlderThan'
+        $reasonText = "Version < $targetVer"
+        $predicate = { param([version]$installedVer) $installedVer -lt $targetVer }.GetNewClosure()
+        Write-Host "Uninstalling ArchiveLens versions older than $targetVer..." -ForegroundColor Cyan
+    }
+    elseif ($PSBoundParameters.ContainsKey('RemoveOlderThanOrEqualTo'))
+    {
+        [version]$targetVer = ConvertTo-ArchiveLensCleanVersion -InputVersion $RemoveOlderThanOrEqualTo -ParameterName 'RemoveOlderThanOrEqualTo'
+        $reasonText = "Version <= $targetVer"
+        $predicate = { param([version]$installedVer) $installedVer -le $targetVer }.GetNewClosure()
+        Write-Host "Uninstalling ArchiveLens versions older than or equal to $targetVer..." -ForegroundColor Cyan
+    }
+
+    foreach ($modRoot in $targetRoots)
+    {
+        Remove-ArchiveLensLegacyRootFiles -ModuleRootPath $modRoot -FileNames $script:ModulePackageFiles
+    }
+
+    $removedCount = Invoke-ArchiveLensVersionPruning `
+        -TargetModuleRoots $targetRoots `
+        -ShouldRemovePredicate $predicate `
+        -ReasonDescription $reasonText
+
+    if ($removedCount -eq 0)
+    {
+        Write-Host "No installed version folders matched filter ($reasonText)." -ForegroundColor Yellow
+    }
+
+    $allRemaining = [System.Collections.Generic.List[PSCustomObject]]::new()
+    foreach ($modRoot in $targetRoots)
+    {
+        $verDirs = @(Get-ArchiveLensInstalledVersionDirectories -ModuleRootPath $modRoot)
+        foreach ($vd in $verDirs)
+        {
+            $allRemaining.Add($vd)
+        }
+    }
+    $remainingSorted = @($allRemaining | Sort-Object -Property Version -Descending)
+
+    if ($remainingSorted.Count -eq 0)
+    {
+        Write-Host "No ArchiveLens versions remain on the system. Cleaning up shared CLI launcher and PATH..." -ForegroundColor Cyan
+        Remove-ArchiveLensSharedCliAndPath -CliRootDirectory $InstallRoot -CliBinDirectory $cliBinDir -SkipEnv:$SkipEnvironmentPath
+
+        if ($usingDefaultModuleRoots -and -not $KeepLoadedSession -and -not $WhatIfPreference)
+        {
+            Remove-Module -Name 'ArchiveLens' -Force -ErrorAction SilentlyContinue
+        }
+    }
+    else
+    {
+        Sync-ArchiveLensCliWithHighestRemainingVersion `
+            -HighestVersionDirectory $remainingSorted[0] `
+            -CliBinDirectory $cliBinDir `
+            -FileNames $script:ModulePackageFiles
+    }
+
+    Write-Host "ArchiveLens targeted uninstallation complete." -ForegroundColor Green
+}
+
+#endregion
+
 Set-Alias -Name ArchiveToText -Value Convert-ArchiveToText
 
-Export-ModuleMember -Function @('Convert-ArchiveToText', 'Find-SevenZipExecutable') -Alias @('ArchiveToText')
+Export-ModuleMember -Function @('Convert-ArchiveToText', 'Find-SevenZipExecutable', 'Uninstall-ArchiveLens') -Alias @('ArchiveToText')
 
 #endregion

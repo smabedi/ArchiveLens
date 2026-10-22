@@ -58,24 +58,49 @@ immediately see:
 
 ## Installation
 
-ArchiveLens installs per-user and **does not require Administrator privileges**.
+ArchiveLens installs per-user with **side-by-side semantic versioning** and **does not require Administrator privileges**.
 
 Clone or download this repository and open **PowerShell** in the project folder:
 
 ```powershell
+# Default install: installs 0.3.0 into Modules\ArchiveLens\0.3.0\ alongside any other versions
 .\Install.ps1 -AddToPath
+
+# Install 0.3.0 and remove any older version folders (< 0.3.0)
+.\Install.ps1 -RemoveOlderVersions -AddToPath
+
+# Clean install: install 0.3.0 and delete all other version folders
+.\Install.ps1 -CleanInstall -AddToPath
 ```
 
 This script:
-1. Copies the `ArchiveLens` module to your user PowerShell module directories for both **PowerShell 7** (`Documents\PowerShell\Modules\ArchiveLens`) and **Windows PowerShell 5.1** (`Documents\WindowsPowerShell\Modules\ArchiveLens`).
+1. Copies the `ArchiveLens` module to versioned subdirectories under your user PowerShell module directories for both **PowerShell 7** (`Documents\PowerShell\Modules\ArchiveLens\0.3.0`) and **Windows PowerShell 5.1** (`Documents\WindowsPowerShell\Modules\ArchiveLens\0.3.0`).
 2. Installs the command-line wrapper (`ArchiveToText.cmd` and runtime scripts) to `%LOCALAPPDATA%\Programs\ArchiveLens\bin`.
 3. Adds `%LOCALAPPDATA%\Programs\ArchiveLens\bin` to your user `PATH` (when `-AddToPath` is specified).
 
-To uninstall at any time:
+### Uninstallation
+
+Once installed, you do **not** need to keep the downloaded release folder to uninstall or manage versions. You can run the built-in `Uninstall-ArchiveLens` cmdlet from any PowerShell window (or use `.\Install.ps1 -Uninstall` from the repository folder).
+
+All version parameters accept strings with or without a leading `v`/`V` prefix (e.g., `0.2.0` or `v0.2.0`):
 
 ```powershell
-.\Install.ps1 -Uninstall
+# Default uninstall: removes all installed versions, the CLI wrapper, and the User PATH entry
+Uninstall-ArchiveLens
+
+# Remove only a specific version
+Uninstall-ArchiveLens -TargetVersion v0.1.0
+
+# Remove versions strictly older than 0.3.0
+Uninstall-ArchiveLens -RemoveOlderThan 0.3.0
+
+# Remove versions older than or equal to 0.2.0
+Uninstall-ArchiveLens -RemoveOlderThanOrEqualTo v0.2.0
 ```
+
+*(Note: All flags above are also supported on `.\Install.ps1 -Uninstall`.)*
+
+If a targeted uninstallation leaves zero versions of `ArchiveLens` on the system, `Uninstall-ArchiveLens` (and `Install.ps1 -Uninstall`) automatically cleans up the shared CLI launcher and User `PATH` entry.
 
 ---
 
@@ -108,21 +133,21 @@ ArchiveToText "C:\Releases\Source.tar.xz" "C:\Reports\SourceReport.txt" -Exclude
 
 ## Parameters
 
-| Parameter | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `-ArchivePath` | `string` | *(Prompted)* | Path to input archive (`.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.xz`, `.zst`). |
-| `-OutputPath` | `string` | `<BaseName>.txt` | Destination path for the UTF-8 report (strips `.tar.*` suffixes automatically). |
-| `-SevenZipPath` | `string` | Auto-detected | Explicit path to `7z.exe` for non-ZIP formats. |
-| `-IncludeGit` | `switch` | `$false` | Includes files inside `.git/` directories (excluded by default). |
-| `-ExcludeSensitive` | `switch` | `$false` | Excludes common credential files (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.pfx`, `*.kdbx`, etc.). |
-| `-ExcludePattern` | `string[]` | `@()` | Wildcard patterns (e.g., `'*.min.js'`, `'node_modules/*'`) to exclude. |
-| `-MaxFileSizeMB` | `int` | `10` | Maximum size (MB) for an individual file to be decoded as text (`1`–`500`). |
-| `-MaxTotalSizeMB` | `int` | `250` | Maximum cumulative uncompressed archive size (MB) allowed (`1`–`10000`). |
-| `-MaxEntryCount` | `int` | `10000` | Maximum archive entries allowed before aborting extraction (`1`–`500000`). |
-| `-FallbackEncodingCodePage` | `int` | `1252` | Fallback code page when strict UTF-8 fails (e.g., `1256` for Persian/Arabic; `0` to disable). |
-| `-NoInteractive` | `switch` | `$false` | Disables interactive `Read-Host` prompts when `-ArchivePath` is omitted. |
-| `-PassThru` | `switch` | `$false` | Emits a `PSCustomObject` with run counts, timestamps, status, and exit code. |
-| `-Force` | `switch` | `$false` | Overwrites `-OutputPath` if the file already exists. |
+| Parameter                   | Type       | Default          | Description                                                                                       |
+|:----------------------------|:-----------|:-----------------|:--------------------------------------------------------------------------------------------------|
+| `-ArchivePath`              | `string`   | *(Prompted)*     | Path to input archive (`.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.xz`, `.zst`).      |
+| `-OutputPath`               | `string`   | `<BaseName>.txt` | Destination path for the UTF-8 report (strips `.tar.*` suffixes automatically).                   |
+| `-SevenZipPath`             | `string`   | Auto-detected    | Explicit path to `7z.exe` for non-ZIP formats.                                                    |
+| `-IncludeGit`               | `switch`   | `$false`         | Includes files inside `.git/` directories (excluded by default).                                  |
+| `-ExcludeSensitive`         | `switch`   | `$false`         | Excludes common credential files (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.pfx`, `*.kdbx`, etc.). |
+| `-ExcludePattern`           | `string[]` | `@()`            | Wildcard patterns (e.g., `'*.min.js'`, `'node_modules/*'`) to exclude.                            |
+| `-MaxFileSizeMB`            | `int`      | `10`             | Maximum size (MB) for an individual file to be decoded as text (`1`–`500`).                       |
+| `-MaxTotalSizeMB`           | `int`      | `250`            | Maximum cumulative uncompressed archive size (MB) allowed (`1`–`10000`).                          |
+| `-MaxEntryCount`            | `int`      | `10000`          | Maximum archive entries allowed before aborting extraction (`1`–`500000`).                        |
+| `-FallbackEncodingCodePage` | `int`      | `1252`           | Fallback code page when strict UTF-8 fails (e.g., `1256` for Persian/Arabic; `0` to disable).     |
+| `-NoInteractive`            | `switch`   | `$false`         | Disables interactive `Read-Host` prompts when `-ArchivePath` is omitted.                          |
+| `-PassThru`                 | `switch`   | `$false`         | Emits a `PSCustomObject` with run counts, timestamps, status, and exit code.                      |
+| `-Force`                    | `switch`   | `$false`         | Overwrites `-OutputPath` if the file already exists.                                              |
 
 ---
 
@@ -137,11 +162,11 @@ Every generated report is encoded in **UTF-8 (no BOM)** with normalized LF (`\n`
 
 ### Exit Codes
 
-| Exit Code | Meaning |
-| :--- | :--- |
-| `0` | **Success:** Archive extracted and all candidate text files decoded cleanly. |
-| `1` | **Fatal Error:** Missing archive, unsupported format, safety limit exceeded, Zip-Slip attempt, or I/O error. |
-| `2` | **Partial Success:** Report generated, but one or more files failed text decoding (`FailedCount > 0`). |
+| Exit Code | Meaning                                                                                                      |
+|:----------|:-------------------------------------------------------------------------------------------------------------|
+| `0`       | **Success:** Archive extracted and all candidate text files decoded cleanly.                                 |
+| `1`       | **Fatal Error:** Missing archive, unsupported format, safety limit exceeded, Zip-Slip attempt, or I/O error. |
+| `2`       | **Partial Success:** Report generated, but one or more files failed text decoding (`FailedCount > 0`).       |
 
 ---
 
