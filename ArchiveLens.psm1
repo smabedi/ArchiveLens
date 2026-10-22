@@ -4,13 +4,19 @@ Set-StrictMode -Version Latest
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+    [System.Text.Encoding]::RegisterProvider([System.Text.CodePagesEncodingProvider]::Instance)
+}
+
 #region Constants & Known Classifications
 
-$script:ModuleVersion = '0.1.0'
+$script:ModuleVersion = '0.2.0'
 
 $script:ExitCodeSuccess = 0
 $script:ExitCodeFatalError = 1
 $script:ExitCodePartialSuccess = 2
+
+$script:SupportedExtensionsDisplay = '.zip, .rar, .7z, .tar, .gz, .tgz, .bz2, .xz, .zst'
 
 # Extensions known to be non-text binary formats (SVG is intentionally excluded as it is XML text)
 $script:KnownBinaryExtensions = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -19,7 +25,7 @@ $script:KnownBinaryExtensions = [System.Collections.Generic.HashSet[string]]::ne
     '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico', '.webp', '.tiff', '.tif', '.psd', '.heic', '.raw',
     '.mp3', '.mp4', '.mov', '.avi', '.wav', '.mkv', '.flac', '.ogg', '.m4a', '.wmv', '.webm',
     # Archives & Disk Images
-    '.zip', '.tar', '.gz', '.tgz', '.7z', '.rar', '.bz2', '.xz', '.zst', '.iso', '.IMG', '.vhd', '.vhdx',
+    '.zip', '.tar', '.gz', '.tgz', '.7z', '.rar', '.bz2', '.xz', '.zst', '.iso', '.img', '.vhd', '.vhdx',
     # Executables, Libraries & Bytecode
     '.exe', '.dll', '.so', '.dylib', '.class', '.jar', '.war', '.ear', '.bin', '.pyc', '.pyd', '.pyo',
     '.o', '.obj', '.a', '.lib', '.pdb', '.wasm', '.msi', '.cab', '.sys', '.drv',
@@ -84,6 +90,174 @@ function Resolve-NormalizedFullPath
         $combined = [System.IO.Path]::Combine($BasePath, $trimmed)
         return [System.IO.Path]::GetFullPath($combined)
     }
+}
+
+function Get-ArchiveFormatInfo
+{
+    <#
+    .SYNOPSIS
+    Determines the archive format, whether 7-Zip is required, and whether the archive is a compressed stream.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    $fileName = [System.IO.Path]::GetFileName($ArchivePath)
+    $lowerName = $fileName.ToLowerInvariant()
+    $ext = [System.IO.Path]::GetExtension($ArchivePath).ToLowerInvariant()
+
+    $isCompoundTar = (
+    $lowerName.EndsWith('.tar.gz') -or
+            $lowerName.EndsWith('.tar.bz2') -or
+            $lowerName.EndsWith('.tar.xz') -or
+            $lowerName.EndsWith('.tar.zst') -or
+            $ext -eq '.tgz'
+    )
+
+    switch ($ext)
+    {
+        '.zip' {
+            return @{
+                Format = 'ZIP'
+                Extension = '.zip'
+                RequiresSevenZip = $false
+                IsStreamFormat = $false
+                IsCompoundTar = $false
+            }
+        }
+        '.rar' {
+            return @{
+                Format = 'RAR'
+                Extension = '.rar'
+                RequiresSevenZip = $true
+                IsStreamFormat = $false
+                IsCompoundTar = $false
+            }
+        }
+        '.7z' {
+            return @{
+                Format = '7Z'
+                Extension = '.7z'
+                RequiresSevenZip = $true
+                IsStreamFormat = $false
+                IsCompoundTar = $false
+            }
+        }
+        '.tar' {
+            return @{
+                Format = 'TAR'
+                Extension = '.tar'
+                RequiresSevenZip = $true
+                IsStreamFormat = $false
+                IsCompoundTar = $false
+            }
+        }
+        '.gz' {
+            return @{
+                Format = if ($isCompoundTar)
+                {
+                    'TAR.GZ'
+                }
+                else
+                {
+                    'GZ'
+                }
+                Extension = '.gz'
+                RequiresSevenZip = $true
+                IsStreamFormat = $true
+                IsCompoundTar = $isCompoundTar
+            }
+        }
+        '.tgz' {
+            return @{
+                Format = 'TGZ'
+                Extension = '.tgz'
+                RequiresSevenZip = $true
+                IsStreamFormat = $true
+                IsCompoundTar = $true
+            }
+        }
+        '.bz2' {
+            return @{
+                Format = if ($isCompoundTar)
+                {
+                    'TAR.BZ2'
+                }
+                else
+                {
+                    'BZ2'
+                }
+                Extension = '.bz2'
+                RequiresSevenZip = $true
+                IsStreamFormat = $true
+                IsCompoundTar = $isCompoundTar
+            }
+        }
+        '.xz' {
+            return @{
+                Format = if ($isCompoundTar)
+                {
+                    'TAR.XZ'
+                }
+                else
+                {
+                    'XZ'
+                }
+                Extension = '.xz'
+                RequiresSevenZip = $true
+                IsStreamFormat = $true
+                IsCompoundTar = $isCompoundTar
+            }
+        }
+        '.zst' {
+            return @{
+                Format = if ($isCompoundTar)
+                {
+                    'TAR.ZST'
+                }
+                else
+                {
+                    'ZST'
+                }
+                Extension = '.zst'
+                RequiresSevenZip = $true
+                IsStreamFormat = $true
+                IsCompoundTar = $isCompoundTar
+            }
+        }
+        default {
+            return $null
+        }
+    }
+}
+
+function Get-ArchiveDefaultOutputPath
+{
+    <#
+    .SYNOPSIS
+    Computes the default .txt report path for an archive, cleanly stripping compound .tar.* extensions.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath
+    )
+
+    $dir = [System.IO.Path]::GetDirectoryName($ArchivePath)
+    $fileName = [System.IO.Path]::GetFileName($ArchivePath)
+
+    if ($fileName -match '(?i)^(.+)\.tar\.(gz|bz2|xz|zst)$')
+    {
+        $baseName = $Matches[1]
+        if (-not [string]::IsNullOrWhiteSpace($baseName))
+        {
+            return [System.IO.Path]::Combine($dir, "$baseName.txt")
+        }
+    }
+
+    return [System.IO.Path]::ChangeExtension($ArchivePath, '.txt')
 }
 
 function Find-SevenZipExecutable
@@ -194,25 +368,37 @@ function Test-ChildPathSafe
         return $false
     }
 
+    # Strip harmless leading './' or '.\' segments sometimes present in TAR archives
+    $cleanedRelative = $CandidateRelativePath
+    while ($cleanedRelative.StartsWith('./') -or $cleanedRelative.StartsWith('.\'))
+    {
+        $cleanedRelative = $cleanedRelative.Substring(2)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($cleanedRelative) -or $cleanedRelative -eq '.')
+    {
+        return $true
+    }
+
     # Reject explicit drive letters or rooted paths inside archive entry names
-    if ($CandidateRelativePath -match '^[a-zA-Z]:' -or $CandidateRelativePath.StartsWith('\') -or $CandidateRelativePath.StartsWith('/'))
+    if ($cleanedRelative -match '^[a-zA-Z]:' -or $cleanedRelative.StartsWith('\') -or $cleanedRelative.StartsWith('/'))
     {
         return $false
     }
 
     # Reject explicit '..' path traversal segments before and after normalization
-    $segments = $CandidateRelativePath -split '[\\/]'
+    $segments = $cleanedRelative -split '[\\/]'
     if ($segments -contains '..')
     {
         return $false
     }
 
     $normalizedRoot = [System.IO.Path]::GetFullPath($RootDirectory).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-    $SafeRelative = $CandidateRelativePath.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+    $safeRelative = $cleanedRelative.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
 
     try
     {
-        $combinedFull = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($normalizedRoot, $SafeRelative))
+        $combinedFull = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($normalizedRoot, $safeRelative))
     }
     catch
     {
@@ -249,7 +435,7 @@ function Expand-ZipArchiveSafely
         catch
         {
             throw [System.IO.InvalidDataException]::new(
-                    "Failed to open ZIP archive '$ArchivePath'. The file may be corrupt, encrypted, or not a valid ZIP archive. Details: $( $_.Exception.Message )",
+                    "Failed to open ZIP archive '$ArchivePath'. The file may be corrupt, encrypted, or not a valid ZIP archive. Details: $($_.Exception.Message)",
                     $_.Exception
             )
         }
@@ -257,7 +443,7 @@ function Expand-ZipArchiveSafely
         if ($zip.Entries.Count -gt $MaxEntryCount)
         {
             throw [System.InvalidOperationException]::new(
-                    "Archive entry count ($( $zip.Entries.Count )) exceeds the configured safety limit of $MaxEntryCount entries (-MaxEntryCount)."
+                    "Archive entry count ($($zip.Entries.Count)) exceeds the configured safety limit of $MaxEntryCount entries (-MaxEntryCount)."
             )
         }
 
@@ -278,7 +464,7 @@ function Expand-ZipArchiveSafely
             # Skip directory entries (entries ending with / or \)
             if ($entryName.EndsWith('/') -or $entryName.EndsWith('\') -or ($entry.Length -eq 0 -and [string]::IsNullOrEmpty($entry.Name)))
             {
-                $dirTarget = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($normalizedRoot,$entryName.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
+                $dirTarget = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($normalizedRoot, $entryName.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
                 if (-not (Test-Path -LiteralPath $dirTarget -PathType Container))
                 {
                     [void][System.IO.Directory]::CreateDirectory($dirTarget)
@@ -324,10 +510,14 @@ function Expand-ZipArchiveSafely
                     $outStream.Write($buffer, 0, $read)
                 }
             }
+            catch [System.InvalidOperationException]
+            {
+                throw
+            }
             catch
             {
                 throw [System.IO.InvalidDataException]::new(
-                        "Failed to extract entry '$entryName' from ZIP archive. The archive may be password-protected or corrupt. Details: $( $_.Exception.Message )",
+                        "Failed to extract entry '$entryName' from ZIP archive. The archive may be password-protected or corrupt. Details: $($_.Exception.Message)",
                         $_.Exception
                 )
             }
@@ -353,8 +543,66 @@ function Expand-ZipArchiveSafely
     }
 }
 
-function Expand-RarArchiveSafely
+function Test-TarHeaderSignature
 {
+    <#
+    .SYNOPSIS
+    Checks whether a file on disk is a POSIX/GNU TAR archive by inspecting the 'ustar' magic signature at offset 257.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+
+    if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf))
+    {
+        return $false
+    }
+
+    try
+    {
+        $fInfo = [System.IO.FileInfo]::new($FilePath)
+        if ($fInfo.Length -lt 512)
+        {
+            return $false
+        }
+
+        $fs = [System.IO.File]::Open($FilePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        try
+        {
+            $buf = New-Object byte[] 263
+            $read = $fs.Read($buf, 0, 263)
+            if ($read -lt 262)
+            {
+                return $false
+            }
+            # 'ustar' at byte offset 257..261 (75 73 74 61 72)
+            return (
+            $buf[257] -eq 0x75 -and
+                    $buf[258] -eq 0x73 -and
+                    $buf[259] -eq 0x74 -and
+                    $buf[260] -eq 0x61 -and
+                    $buf[261] -eq 0x72
+            )
+        }
+        finally
+        {
+            $fs.Dispose()
+        }
+    }
+    catch
+    {
+        return $false
+    }
+}
+
+function Invoke-SevenZipSinglePass
+{
+    <#
+    .SYNOPSIS
+    Pre-inspects and extracts a single archive layer via 7-Zip with entry count, size, symlink, and Zip-Slip checks.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
@@ -363,8 +611,11 @@ function Expand-RarArchiveSafely
         [Parameter(Mandatory = $true)]
         [string]$DestinationDirectory,
 
-        [Parameter()]
-        [string]$SevenZipPath,
+        [Parameter(Mandatory = $true)]
+        [string]$SevenZipExe,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FormatLabel,
 
         [Parameter(Mandatory = $true)]
         [int]$MaxEntryCount,
@@ -373,17 +624,9 @@ function Expand-RarArchiveSafely
         [long]$MaxTotalBytes
     )
 
-    $sevenZipExe = Find-SevenZipExecutable -ExplicitPath $SevenZipPath
-    if ( [string]::IsNullOrWhiteSpace($sevenZipExe))
-    {
-        throw [System.InvalidOperationException]::new(
-                "RAR archive extraction requires 7-Zip (7z.exe), which was not found on PATH or in standard installation directories. Install 7-Zip from https://www.7-zip.org/ or provide its path via -SevenZipPath."
-        )
-    }
-
-    # Step 1: Pre-inspect RAR entries using 7z technical listing ('l -slt')
+    # Step 1: Pre-inspect archive entries using 7z technical listing ('l -slt')
     $listArgs = @('l', '-slt', '-p-', '-bd', '--', $ArchivePath)
-    $listOutput = & $sevenZipExe @listArgs 2>&1
+    $listOutput = & $SevenZipExe @listArgs 2>&1
     $listExitCode = $LASTEXITCODE
 
     if ($listExitCode -ne 0)
@@ -392,11 +635,11 @@ function Expand-RarArchiveSafely
         if ($joinedOut -match 'Wrong password|Encrypted|Can not open encrypted archive')
         {
             throw [System.InvalidOperationException]::new(
-                    "RAR archive '$ArchivePath' is encrypted/password-protected. Encrypted archives are not supported."
+                    "$FormatLabel archive '$ArchivePath' is encrypted/password-protected. Encrypted archives are not supported."
             )
         }
         throw [System.IO.InvalidDataException]::new(
-                "7-Zip failed to inspect RAR archive '$ArchivePath' (Exit code: $listExitCode). Output: $joinedOut"
+                "7-Zip failed to inspect $FormatLabel archive '$ArchivePath' (Exit code: $listExitCode). Output: $joinedOut"
         )
     }
 
@@ -419,7 +662,7 @@ function Expand-RarArchiveSafely
             continue
         }
 
-        if ($line -match '^Path\s*=\s*(.+)$')
+        if ($line -match '^Path\s*=\s*(.*)$')
         {
             $currentPath = $Matches[1].Trim()
             $currentIsDir = $false
@@ -428,15 +671,19 @@ function Expand-RarArchiveSafely
             if ($entryCount -gt $MaxEntryCount)
             {
                 throw [System.InvalidOperationException]::new(
-                        "RAR archive entry count exceeds the configured safety limit of $MaxEntryCount entries (-MaxEntryCount)."
+                        "$FormatLabel archive entry count exceeds the configured safety limit of $MaxEntryCount entries (-MaxEntryCount)."
                 )
             }
 
-            if (-not (Test-ChildPathSafe -RootDirectory $DestinationDirectory -CandidateRelativePath $currentPath))
+            # Single-stream formats (.gz, .bz2, .xz, .zst) without embedded filenames may report an empty Path or default to base name
+            if (-not [string]::IsNullOrWhiteSpace($currentPath) -and $currentPath -ne '.' -and $currentPath -ne './' -and $currentPath -ne '.\')
             {
-                throw [System.Security.SecurityException]::new(
-                        "Security violation: RAR archive entry '$currentPath' attempts path traversal or contains an unsafe path."
-                )
+                if (-not (Test-ChildPathSafe -RootDirectory $DestinationDirectory -CandidateRelativePath $currentPath))
+                {
+                    throw [System.Security.SecurityException]::new(
+                            "Security violation: $FormatLabel archive entry '$currentPath' attempts path traversal or contains an unsafe path."
+                    )
+                }
             }
         }
         elseif ($line -match '^Folder\s*=\s*\+$')
@@ -446,7 +693,7 @@ function Expand-RarArchiveSafely
         elseif ($line -match '^Encrypted\s*=\s*\+$')
         {
             throw [System.InvalidOperationException]::new(
-                    "RAR archive entry '$currentPath' is encrypted. Encrypted RAR archives are not supported."
+                    "$FormatLabel archive entry '$currentPath' is encrypted. Encrypted $FormatLabel archives are not supported."
             )
         }
         elseif ($line -match '^Attributes\s*=\s*(.+)$')
@@ -456,7 +703,17 @@ function Expand-RarArchiveSafely
             if ($attr -match 'l|L')
             {
                 throw [System.Security.SecurityException]::new(
-                        "Security violation: RAR archive entry '$currentPath' is a symbolic link or reparse point."
+                        "Security violation: $FormatLabel archive entry '$currentPath' is a symbolic link or reparse point."
+                )
+            }
+        }
+        elseif ($line -match '^SymbolicLink\s*=\s*(.+)$')
+        {
+            $symTarget = $Matches[1].Trim()
+            if (-not [string]::IsNullOrWhiteSpace($symTarget))
+            {
+                throw [System.Security.SecurityException]::new(
+                        "Security violation: $FormatLabel archive entry '$currentPath' is a symbolic link targeting '$symTarget'."
                 )
             }
         }
@@ -470,26 +727,215 @@ function Expand-RarArchiveSafely
                 {
                     $limitMB = [Math]::Round($MaxTotalBytes / 1MB, 2)
                     throw [System.InvalidOperationException]::new(
-                            "RAR archive cumulative uncompressed size exceeds the configured safety limit of $limitMB MB (-MaxTotalSizeMB)."
+                            "$FormatLabel archive cumulative uncompressed size exceeds the configured safety limit of $limitMB MB (-MaxTotalSizeMB)."
                     )
                 }
             }
         }
     }
 
-    # Step 2: Extract safely into the temporary directory
+    # Step 2: Extract safely into the destination directory
     $outArg = "-o$DestinationDirectory"
     $extractArgs = @('x', '-y', '-p-', '-bd', '-snl-', $outArg, '--', $ArchivePath)
-    $extractOutput = & $sevenZipExe @extractArgs 2>&1
+    $extractOutput = & $SevenZipExe @extractArgs 2>&1
     $extractExitCode = $LASTEXITCODE
 
     if ($extractExitCode -ne 0)
     {
         $joinedOut = ($extractOutput | ForEach-Object { "$_" }) -join [Environment]::NewLine
+        if ($joinedOut -match 'Wrong password|Encrypted|Can not open encrypted archive|Data Error in encrypted file')
+        {
+            throw [System.InvalidOperationException]::new(
+                    "$FormatLabel archive '$ArchivePath' is encrypted/password-protected. Encrypted archives are not supported."
+            )
+        }
         throw [System.IO.InvalidDataException]::new(
-                "7-Zip extraction failed for '$ArchivePath' with exit code $extractExitCode. Details: $joinedOut"
+                "7-Zip extraction failed for $FormatLabel archive '$ArchivePath' with exit code $extractExitCode. Details: $joinedOut"
         )
     }
+
+    # Step 3: Post-extraction verification (guards against stream formats where uncompressed size was unknown before extraction)
+    $extractedFiles = @(Get-ChildItem -LiteralPath $DestinationDirectory -File -Recurse -Force -ErrorAction Stop)
+    if ($extractedFiles.Count -gt $MaxEntryCount)
+    {
+        throw [System.InvalidOperationException]::new(
+                "$FormatLabel archive extracted file count ($($extractedFiles.Count)) exceeds the configured safety limit of $MaxEntryCount entries (-MaxEntryCount)."
+        )
+    }
+
+    [long]$actualExtractedBytes = 0
+    foreach ($ef in $extractedFiles)
+    {
+        $actualExtractedBytes += $ef.Length
+        if ($actualExtractedBytes -gt $MaxTotalBytes)
+        {
+            $limitMB = [Math]::Round($MaxTotalBytes / 1MB, 2)
+            throw [System.InvalidOperationException]::new(
+                    "$FormatLabel archive decompressed size on disk exceeds the configured safety limit of $limitMB MB (-MaxTotalSizeMB)."
+            )
+        }
+    }
+}
+
+function Expand-SevenZipArchiveSafely
+{
+    <#
+    .SYNOPSIS
+    Extracts .rar, .7z, .tar, .gz, .tgz, .bz2, .xz, and .zst archives safely using 7-Zip,
+    automatically performing a two-stage extraction when a compressed stream wraps a TAR archive.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory,
+
+        [Parameter()]
+        [string]$SevenZipPath,
+
+        [Parameter(Mandatory = $true)]
+        [hashtable]$FormatInfo,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxEntryCount,
+
+        [Parameter(Mandatory = $true)]
+        [long]$MaxTotalBytes
+    )
+
+    $formatLabel = $FormatInfo.Format
+    $sevenZipExe = Find-SevenZipExecutable -ExplicitPath $SevenZipPath
+    if ( [string]::IsNullOrWhiteSpace($sevenZipExe))
+    {
+        throw [System.InvalidOperationException]::new(
+                "$formatLabel archive extraction requires 7-Zip (7z.exe), which was not found on PATH or in standard installation directories. Install 7-Zip from https://www.7-zip.org/ or provide its path via -SevenZipPath."
+        )
+    }
+
+    if (-not $FormatInfo.IsStreamFormat)
+    {
+        # Direct container archive (.rar, .7z, .tar)
+        Invoke-SevenZipSinglePass `
+            -ArchivePath $ArchivePath `
+            -DestinationDirectory $DestinationDirectory `
+            -SevenZipExe $sevenZipExe `
+            -FormatLabel $formatLabel `
+            -MaxEntryCount $MaxEntryCount `
+            -MaxTotalBytes $MaxTotalBytes
+        return
+    }
+
+    # Compressed stream format (.gz, .tgz, .bz2, .xz, .zst):
+    # Extract outer stream to an isolated staging directory first so we can check if the payload is a TAR archive.
+    $stageDir = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ("ArchiveLens_StreamStage_" + [guid]::NewGuid().ToString('N'))
+    [void][System.IO.Directory]::CreateDirectory($stageDir)
+
+    try
+    {
+        Invoke-SevenZipSinglePass `
+            -ArchivePath $ArchivePath `
+            -DestinationDirectory $stageDir `
+            -SevenZipExe $sevenZipExe `
+            -FormatLabel $formatLabel `
+            -MaxEntryCount $MaxEntryCount `
+            -MaxTotalBytes $MaxTotalBytes
+
+        $stageFiles = @(Get-ChildItem -LiteralPath $stageDir -File -Recurse -Force -ErrorAction Stop)
+
+        if ($stageFiles.Count -eq 1)
+        {
+            $innerFile = $stageFiles[0]
+            $isInnerTar = (
+            $FormatInfo.IsCompoundTar -or
+                    $innerFile.Extension.Equals('.tar', [System.StringComparison]::OrdinalIgnoreCase) -or
+                    (Test-TarHeaderSignature -FilePath $innerFile.FullName)
+            )
+
+            if ($isInnerTar)
+            {
+                Write-Verbose "Detected inner TAR container '$($innerFile.Name)' inside $formatLabel stream; performing second-stage TAR extraction..."
+                Invoke-SevenZipSinglePass `
+                    -ArchivePath $innerFile.FullName `
+                    -DestinationDirectory $DestinationDirectory `
+                    -SevenZipExe $sevenZipExe `
+                    -FormatLabel "$formatLabel (inner TAR)" `
+                    -MaxEntryCount $MaxEntryCount `
+                    -MaxTotalBytes $MaxTotalBytes
+                return
+            }
+        }
+
+        # Not a TAR container (e.g., standalone file.txt.gz, script.ps1.xz, data.json.zst):
+        # Move decompressed file(s) preserving relative structure into $DestinationDirectory
+        $normalizedStageRoot = [System.IO.Path]::GetFullPath($stageDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+        foreach ($sf in $stageFiles)
+        {
+            $rel = $sf.FullName.Substring($normalizedStageRoot.Length)
+            if (-not (Test-ChildPathSafe -RootDirectory $DestinationDirectory -CandidateRelativePath $rel))
+            {
+                throw [System.Security.SecurityException]::new(
+                        "Security violation: Decompressed stream entry '$rel' attempts path traversal."
+                )
+            }
+            $targetPath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($DestinationDirectory, $rel))
+            $targetParent = [System.IO.Path]::GetDirectoryName($targetPath)
+            if (-not (Test-Path -LiteralPath $targetParent -PathType Container))
+            {
+                [void][System.IO.Directory]::CreateDirectory($targetParent)
+            }
+            Move-Item -LiteralPath $sf.FullName -Destination $targetPath -Force -ErrorAction Stop
+        }
+    }
+    finally
+    {
+        if (Test-Path -LiteralPath $stageDir)
+        {
+            Remove-Item -LiteralPath $stageDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Expand-RarArchiveSafely
+{
+    <#
+    .SYNOPSIS
+    Backwards-compatible wrapper around Expand-SevenZipArchiveSafely for RAR archives.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath,
+
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationDirectory,
+
+        [Parameter()]
+        [string]$SevenZipPath,
+
+        [Parameter(Mandatory = $true)]
+        [int]$MaxEntryCount,
+
+        [Parameter(Mandatory = $true)]
+        [long]$MaxTotalBytes
+    )
+
+    $rarInfo = @{
+        Format = 'RAR'
+        Extension = '.rar'
+        RequiresSevenZip = $true
+        IsStreamFormat = $false
+        IsCompoundTar = $false
+    }
+
+    Expand-SevenZipArchiveSafely `
+        -ArchivePath $ArchivePath `
+        -DestinationDirectory $DestinationDirectory `
+        -SevenZipPath $SevenZipPath `
+        -FormatInfo $rarInfo `
+        -MaxEntryCount $MaxEntryCount `
+        -MaxTotalBytes $MaxTotalBytes
 }
 
 function Test-MagicBinarySignature
@@ -516,11 +962,26 @@ function Test-MagicBinarySignature
     {
         # Ensure it's not a tiny text file starting with "MZ" by checking if file has NUL bytes in first 64 bytes
         $checkLen = [Math]::Min($len, 64)
-        for ($i = 2; $i -lt $checkLen; $i++) {
+        for ($i = 2; $i -lt $checkLen; $i++)
+        {
             if ($Bytes[$i] -eq 0x00)
             {
                 return 'Windows/DOS Executable signature (MZ)'
             }
+        }
+    }
+
+    if ($len -ge 6)
+    {
+        # 7z: 37 7A BC AF 27 1C
+        if ($Bytes[0] -eq 0x37 -and $Bytes[1] -eq 0x7A -and $Bytes[2] -eq 0xBC -and $Bytes[3] -eq 0xAF -and $Bytes[4] -eq 0x27 -and $Bytes[5] -eq 0x1C)
+        {
+            return '7-Zip archive signature'
+        }
+        # XZ: FD 37 7A 58 5A 00
+        if ($Bytes[0] -eq 0xFD -and $Bytes[1] -eq 0x37 -and $Bytes[2] -eq 0x7A -and $Bytes[3] -eq 0x58 -and $Bytes[4] -eq 0x5A -and $Bytes[5] -eq 0x00)
+        {
+            return 'XZ compressed signature'
         }
     }
 
@@ -540,6 +1001,11 @@ function Test-MagicBinarySignature
         if ($Bytes[0] -eq 0x52 -and $Bytes[1] -eq 0x61 -and $Bytes[2] -eq 0x72 -and $Bytes[3] -eq 0x21)
         {
             return 'RAR archive signature'
+        }
+        # Zstandard (.zst): 28 B5 2F FD
+        if ($Bytes[0] -eq 0x28 -and $Bytes[1] -eq 0xB5 -and $Bytes[2] -eq 0x2F -and $Bytes[3] -eq 0xFD)
+        {
+            return 'Zstandard (ZST) compressed signature'
         }
         # PDF: 25 50 44 46 (%PDF)
         if ($Bytes[0] -eq 0x25 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x44 -and $Bytes[3] -eq 0x46)
@@ -565,6 +1031,11 @@ function Test-MagicBinarySignature
         if ($Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x61 -and $Bytes[2] -eq 0x73 -and $Bytes[3] -eq 0x6D)
         {
             return 'WebAssembly binary signature'
+        }
+        # BZip2 (.bz2): 42 5A 68 ('BZh' followed by block size digit '1'..'9')
+        if ($Bytes[0] -eq 0x42 -and $Bytes[1] -eq 0x5A -and $Bytes[2] -eq 0x68 -and $Bytes[3] -ge 0x31 -and $Bytes[3] -le 0x39)
+        {
+            return 'BZip2 compressed signature'
         }
     }
 
@@ -592,6 +1063,15 @@ function Test-MagicBinarySignature
         }
     }
 
+    if ($len -ge 262)
+    {
+        # POSIX TAR header ('ustar' at byte offset 257..261)
+        if ($Bytes[257] -eq 0x75 -and $Bytes[258] -eq 0x73 -and $Bytes[259] -eq 0x74 -and $Bytes[260] -eq 0x61 -and $Bytes[261] -eq 0x72)
+        {
+            return 'POSIX TAR archive signature'
+        }
+    }
+
     return $null
 }
 
@@ -616,7 +1096,8 @@ function Test-DecodedTextPlausibility
     $inspectLimit = [Math]::Min($DecodedText.Length, 16384)
     $suspiciousCount = 0
 
-    for ($i = 0; $i -lt $inspectLimit; $i++) {
+    for ($i = 0; $i -lt $inspectLimit; $i++)
+    {
         $code = [int][char]$DecodedText[$i]
 
         # NUL character in decoded text is a hard binary indicator
@@ -650,7 +1131,7 @@ function Test-DecodedTextPlausibility
         }
     }
 
-    # Reject if more than 1% of characters are suspicious control codes (or at least 1 suspicious char in very short <20 char binary stubs)
+    # Reject if more than 1% of characters are suspicious control codes (or at least 1 suspicious char in very short <32 char binary stubs)
     if ($inspectLimit -lt 32)
     {
         return ($suspiciousCount -eq 0)
@@ -682,7 +1163,8 @@ function Test-Utf16WithoutBom
     $evenZeros = 0
     $oddZeros = 0
 
-    for ($i = 0; $i -lt $sampleBytes; $i += 2) {
+    for ($i = 0; $i -lt $sampleBytes; $i += 2)
+    {
         if ($Bytes[$i] -eq 0)
         {
             $evenZeros++
@@ -833,7 +1315,7 @@ function Read-AndClassifyFile
     catch
     {
         $result.Status = 'Failed'
-        $result.Reason = "File read error: $( $_.Exception.Message )"
+        $result.Reason = "File read error: $($_.Exception.Message)"
         return $result
     }
 
@@ -946,7 +1428,8 @@ function Read-AndClassifyFile
 
     # 11. Check for raw NUL (0x00) bytes in non-UTF-16/32 stream
     $nullCheckLimit = [Math]::Min($bytes.Length, 65536)
-    for ($i = 0; $i -lt $nullCheckLimit; $i++) {
+    for ($i = 0; $i -lt $nullCheckLimit; $i++)
+    {
         if ($bytes[$i] -eq 0x00)
         {
             $result.Status = 'Skipped'
@@ -996,7 +1479,7 @@ function Read-AndClassifyFile
             if (Test-DecodedTextPlausibility -DecodedText $decodedFallback)
             {
                 $result.Status = 'Text'
-                $result.Encoding = "Fallback-CP$FallbackEncodingCodePage"
+                $result.Encoding = "Fallback-CP $FallbackEncodingCodePage"
                 $result.Reason = "Included via fallback encoding (CodePage $FallbackEncodingCodePage; non-UTF-8 byte stream)"
                 if (-not $MetadataOnly)
                 {
@@ -1034,21 +1517,22 @@ function Convert-ArchiveToText
 {
     <#
     .SYNOPSIS
-    Extracts a ZIP or RAR archive safely and generates a self-contained UTF-8 inspection report containing file inventory, diagnostics, and readable file contents.
+    Extracts a supported archive (.zip, .rar, .7z, .tar, .gz, .tgz, .bz2, .xz, .zst) safely and generates a self-contained UTF-8 inspection report containing file inventory, diagnostics, and readable file contents.
 
     .DESCRIPTION
-    Convert-ArchiveToText (ArchiveLens) inspects ZIP and RAR archives for LLM context preparation, code review, and archival auditing.
+    Convert-ArchiveToText (ArchiveLens) inspects archives (.zip, .rar, .7z, .tar, .gz, .tgz, .bz2, .xz, .zst, including compound .tar.gz, .tar.bz2, .tar.xz, and .tar.zst archives)
+    for LLM context preparation, code review, and archival auditing.
     It safely extracts the archive to an isolated temporary directory, classifies all discovered files using BOM detection, binary signatures,
     strict UTF-8/UTF-16/UTF-32 decoding, and control-character heuristics, and writes a deterministic, single-file report.
 
     .PARAMETER ArchivePath
-    Path to the input .zip or .rar archive. If omitted in an interactive session, the command prompts for the path.
+    Path to the input archive (.zip, .rar, .7z, .tar, .gz, .tgz, .bz2, .xz, or .zst). If omitted in an interactive session, the command prompts for the path.
 
     .PARAMETER OutputPath
-    Path for the generated .txt report. Defaults to the same directory and base name as ArchivePath with a .txt extension.
+    Path for the generated .txt report. Defaults to the same directory and base name as ArchivePath with a .txt extension (stripping compound .tar.* suffixes automatically).
 
     .PARAMETER SevenZipPath
-    Optional explicit path to 7z.exe (used for .rar extraction). If omitted, ArchiveLens searches PATH, Program Files, and the Windows Registry.
+    Optional explicit path to 7z.exe (used for .rar, .7z, .tar, .gz, .tgz, .bz2, .xz, and .zst extraction). If omitted, ArchiveLens searches PATH, Program Files, and the Windows Registry.
 
     .PARAMETER IncludeGit
     Includes files inside .git directories. By default, .git directories are excluded and recorded in the inventory as Excluded.
@@ -1086,9 +1570,14 @@ function Convert-ArchiveToText
     Extracts Example.zip and writes the report to C:\Projects\Example.txt.
 
     .EXAMPLE
-    Convert-ArchiveToText "C:\Backups\Source.rar" -OutputPath "C:\Reports\SourceReport.txt" -ExcludeSensitive -Force
+    Convert-ArchiveToText "C:\Releases\Source.tar.gz"
 
-    Extracts Source.rar using 7-Zip, excludes sensitive files like .env, and overwrites C:\Reports\SourceReport.txt.
+    Extracts both the outer GZIP stream and inner TAR archive of Source.tar.gz and writes the report to C:\Releases\Source.txt.
+
+    .EXAMPLE
+    Convert-ArchiveToText "C:\Backups\Source.7z" -OutputPath "C:\Reports\SourceReport.txt" -ExcludeSensitive -Force
+
+    Extracts Source.7z using 7-Zip, excludes sensitive files like .env, and overwrites C:\Reports\SourceReport.txt.
     #>
     [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
     param(
@@ -1141,7 +1630,6 @@ function Convert-ArchiveToText
     $startTimeUtc = [DateTime]::UtcNow
     $global:LASTEXITCODE = $script:ExitCodeFatalError
     $stagingReportPath = $null
-    $stagingBodyPath = $null
     $sectionDTempPath = $null
     $tempExtractDir = $null
 
@@ -1151,12 +1639,12 @@ function Convert-ArchiveToText
     {
         if ($NoInteractive -or [Console]::IsInputRedirected)
         {
-            $errMsg = "ArchivePath is required. Supply -ArchivePath <path> to a .zip or .rar file."
+            $errMsg = "ArchivePath is required. Supply -ArchivePath <path> to a supported archive ($script:SupportedExtensionsDisplay)."
             Write-Error -Message $errMsg -Category InvalidArgument
             throw [System.ArgumentException]::new($errMsg)
         }
 
-        $ArchivePath = Read-Host "Enter the full path to the input archive (.zip or .rar)"
+        $ArchivePath = Read-Host "Enter the full path to the input archive ($script:SupportedExtensionsDisplay)"
         $promptedInteractively = $true
         if ( [string]::IsNullOrWhiteSpace($ArchivePath))
         {
@@ -1173,7 +1661,7 @@ function Convert-ArchiveToText
     }
     catch
     {
-        $errMsg = "Invalid input archive path '$ArchivePath': $( $_.Exception.Message )"
+        $errMsg = "Invalid input archive path '$ArchivePath': $($_.Exception.Message)"
         Write-Error -Message $errMsg -Category InvalidArgument
         throw
     }
@@ -1185,27 +1673,22 @@ function Convert-ArchiveToText
         throw [System.IO.FileNotFoundException]::new($errMsg, $resolvedArchivePath)
     }
 
-    $archiveExtension = [System.IO.Path]::GetExtension($resolvedArchivePath).ToLowerInvariant()
-    $archiveFormat = switch ($archiveExtension)
+    $formatInfo = Get-ArchiveFormatInfo -ArchivePath $resolvedArchivePath
+    if ($null -eq $formatInfo)
     {
-        '.zip' {
-            'ZIP'
-        }
-        '.rar' {
-            'RAR'
-        }
-        default {
-            $errMsg = "Unsupported archive extension '$archiveExtension' for '$resolvedArchivePath'. Supported formats in v0.1.0 are .zip and .rar."
-            Write-Error -Message $errMsg -Category InvalidArgument
-            throw [System.NotSupportedException]::new($errMsg)
-        }
+        $archiveExtension = [System.IO.Path]::GetExtension($resolvedArchivePath).ToLowerInvariant()
+        $errMsg = "Unsupported archive extension '$archiveExtension' for '$resolvedArchivePath'. Supported formats in v$($script:ModuleVersion) are $script:SupportedExtensionsDisplay."
+        Write-Error -Message $errMsg -Category InvalidArgument
+        throw [System.NotSupportedException]::new($errMsg)
     }
 
+    $archiveFormat = $formatInfo.Format
+
     # 2. Resolve OutputPath (prompt only if ArchivePath was prompted interactively and OutputPath wasn't provided)
+    $defaultOutputCandidate = Get-ArchiveDefaultOutputPath -ArchivePath $resolvedArchivePath
     if ([string]::IsNullOrWhiteSpace($OutputPath) -and $promptedInteractively -and -not $NoInteractive)
     {
-        $defaultCandidate = [System.IO.Path]::ChangeExtension($resolvedArchivePath, '.txt')
-        $userOut = Read-Host "Enter output text file path (press Enter for default: $defaultCandidate)"
+        $userOut = Read-Host "Enter output text file path (press Enter for default: $defaultOutputCandidate)"
         if (-not [string]::IsNullOrWhiteSpace($userOut))
         {
             $OutputPath = $userOut
@@ -1214,7 +1697,7 @@ function Convert-ArchiveToText
 
     if ( [string]::IsNullOrWhiteSpace($OutputPath))
     {
-        $resolvedOutputPath = [System.IO.Path]::ChangeExtension($resolvedArchivePath, '.txt')
+        $resolvedOutputPath = $defaultOutputCandidate
     }
     else
     {
@@ -1224,7 +1707,7 @@ function Convert-ArchiveToText
         }
         catch
         {
-            $errMsg = "Invalid output file path '$OutputPath': $( $_.Exception.Message )"
+            $errMsg = "Invalid output file path '$OutputPath': $($_.Exception.Message)"
             Write-Error -Message $errMsg -Category InvalidArgument
             throw
         }
@@ -1263,13 +1746,13 @@ function Convert-ArchiveToText
         throw [System.IO.IOException]::new($errMsg)
     }
 
-    # Pre-check 7-Zip availability if RAR
-    if ($archiveFormat -eq 'RAR')
+    # Pre-check 7-Zip availability if required by archive format
+    if ($formatInfo.RequiresSevenZip)
     {
         $sevenZipExe = Find-SevenZipExecutable -ExplicitPath $SevenZipPath
         if ( [string]::IsNullOrWhiteSpace($sevenZipExe))
         {
-            $errMsg = "RAR archive support requires 7-Zip (7z.exe), which was not found on PATH or in standard installation directories. Install 7-Zip or pass -SevenZipPath."
+            $errMsg = "$archiveFormat archive support requires 7-Zip (7z.exe), which was not found on PATH or in standard installation directories. Install 7-Zip or pass -SevenZipPath."
             Write-Error -Message $errMsg -Category ObjectNotFound
             throw [System.InvalidOperationException]::new($errMsg)
         }
@@ -1292,7 +1775,6 @@ function Convert-ArchiveToText
     # 3. Verify write permissions in destination directory by creating staging files early
     $runId = [guid]::NewGuid().ToString('N')
     $stagingReportPath = Join-Path -Path $outputDirectory -ChildPath (".[ArchiveLens-staging-$runId].tmp")
-    $stagingBodyPath = Join-Path -Path $outputDirectory -ChildPath (".[ArchiveLens-body-$runId].tmp")
     $tempExtractDir = Join-Path -Path ([System.IO.Path]::GetTempPath()) -ChildPath ("ArchiveLens_" + $runId)
 
     [long]$maxFileBytes = [long]$MaxFileSizeMB * 1MB
@@ -1315,7 +1797,7 @@ function Convert-ArchiveToText
         }
         catch
         {
-            $errMsg = "Unable to create temporary output file in '$outputDirectory': $( $_.Exception.Message )"
+            $errMsg = "Unable to create temporary output file in '$outputDirectory': $($_.Exception.Message)"
             Write-Error -Message $errMsg -Category WriteError
             throw
         }
@@ -1326,20 +1808,30 @@ function Convert-ArchiveToText
 
         # 4. Extract archive safely
         Write-Verbose "Extracting $archiveFormat archive '$resolvedArchivePath'..."
-        if ($archiveFormat -eq 'ZIP')
+        if (-not $formatInfo.RequiresSevenZip)
         {
-            Expand-ZipArchiveSafely -ArchivePath $resolvedArchivePath -DestinationDirectory $tempExtractDir -MaxEntryCount $MaxEntryCount -MaxTotalBytes $maxTotalBytes
+            Expand-ZipArchiveSafely `
+                -ArchivePath $resolvedArchivePath `
+                -DestinationDirectory $tempExtractDir `
+                -MaxEntryCount $MaxEntryCount `
+                -MaxTotalBytes $maxTotalBytes
         }
         else
         {
-            Expand-RarArchiveSafely -ArchivePath $resolvedArchivePath -DestinationDirectory $tempExtractDir -SevenZipPath $SevenZipPath -MaxEntryCount $MaxEntryCount -MaxTotalBytes $maxTotalBytes
+            Expand-SevenZipArchiveSafely `
+                -ArchivePath $resolvedArchivePath `
+                -DestinationDirectory $tempExtractDir `
+                -SevenZipPath $SevenZipPath `
+                -FormatInfo $formatInfo `
+                -MaxEntryCount $MaxEntryCount `
+                -MaxTotalBytes $maxTotalBytes
         }
 
         # 5. Discover all extracted files (including hidden dotfiles like .env and .gitignore)
         $normalizedExtractRoot = [System.IO.Path]::GetFullPath($tempExtractDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
         $rawFiles = @(Get-ChildItem -LiteralPath $tempExtractDir -File -Recurse -Force -ErrorAction Stop)
 
-        # Build deterministically sorted list by normalized archive-relative path (Ordinal sort)
+        # Build deterministically sorted list by normalized archive-relative path (en-US culture sort)
         $discoveredEntries = [System.Collections.Generic.List[object]]::new()
         foreach ($f in $rawFiles)
         {
@@ -1435,7 +1927,6 @@ function Convert-ArchiveToText
                 {
                     $entry.Status = 'Failed'
                     $entry.Encoding = '-'
-
                     $entry.Reason = 'File disappeared during report generation'
                     continue
                 }
@@ -1444,7 +1935,6 @@ function Convert-ArchiveToText
                 {
                     $entry.Status = 'Failed'
                     $entry.Encoding = '-'
-
                     $entry.Reason = 'File size or timestamp changed unexpectedly between inventory and content passes'
                     continue
                 }
@@ -1470,8 +1960,8 @@ function Convert-ArchiveToText
                 $includedCounter++
 
                 $secDWriter.WriteLine("--------------------------------------------------------------------------------")
-                $secDWriter.WriteLine("BEGIN FILE: $( $entry.RelativePath )")
-                $secDWriter.WriteLine("Metadata: Size= $( $entry.SizeBytes ) bytes | Encoding= $( $entry.Encoding )")
+                $secDWriter.WriteLine("BEGIN FILE: $($entry.RelativePath)")
+                $secDWriter.WriteLine("Metadata: Size= $($entry.SizeBytes) bytes | Encoding= $($entry.Encoding)")
                 $secDWriter.WriteLine("--------------------------------------------------------------------------------")
 
                 $textContent = $fullRead.Content
@@ -1485,7 +1975,7 @@ function Convert-ArchiveToText
                     }
                 }
                 $secDWriter.WriteLine("--------------------------------------------------------------------------------")
-                $secDWriter.WriteLine("END FILE: $( $entry.RelativePath )")
+                $secDWriter.WriteLine("END FILE: $($entry.RelativePath)")
                 $secDWriter.WriteLine("--------------------------------------------------------------------------------")
                 $secDWriter.WriteLine("")
             }
@@ -1531,12 +2021,12 @@ function Convert-ArchiveToText
             $reportWriter.WriteLine("================================================================================")
             $reportWriter.WriteLine("SECTION A: REPORT HEADER AND SUMMARY")
             $reportWriter.WriteLine("--------------------------------------------------------------------------------")
-            $reportWriter.WriteLine("Product            : ArchiveLens v$( $script:ModuleVersion )")
+            $reportWriter.WriteLine("Product            : ArchiveLens v$($script:ModuleVersion)")
             $reportWriter.WriteLine("Input Archive      : $resolvedArchivePath")
             $reportWriter.WriteLine("Archive Format     : $archiveFormat")
             $reportWriter.WriteLine("Output Report Path : $resolvedOutputPath")
-            $reportWriter.WriteLine("Start Time (UTC)   : $($startTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') )")
-            $reportWriter.WriteLine("End Time (UTC)     : $($completionTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ') )")
+            $reportWriter.WriteLine("Start Time (UTC)   : $($startTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ'))")
+            $reportWriter.WriteLine("End Time (UTC)     : $($completionTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ'))")
             $reportWriter.WriteLine("Total Files Found  : $totalDiscovered")
             $reportWriter.WriteLine("Text Files Included: $textCount")
             $reportWriter.WriteLine("Files Skipped      : $skippedCount")
@@ -1566,7 +2056,7 @@ function Convert-ArchiveToText
                 foreach ($item in $inventoryList)
                 {
                     $statusPad = $item.Status.PadRight(8)
-                    $reportWriter.WriteLine("[$statusPad] $( $item.RelativePath ) | $( $item.SizeBytes ) B | $( $item.Encoding ) | $( $item.Reason )")
+                    $reportWriter.WriteLine("[$statusPad] $($item.RelativePath) | $($item.SizeBytes) B | $($item.Encoding) | $($item.Reason)")
                 }
             }
             $reportWriter.WriteLine("")
@@ -1574,7 +2064,7 @@ function Convert-ArchiveToText
             # SECTION C: Skipped, Excluded, and Failed Files
             $nonIncluded = @($inventoryList | Where-Object { $_.Status -ne 'Text' })
             $reportWriter.WriteLine("================================================================================")
-            $reportWriter.WriteLine("SECTION C: SKIPPED, EXCLUDED, AND FAILED FILES ($( $nonIncluded.Count ) files)")
+            $reportWriter.WriteLine("SECTION C: SKIPPED, EXCLUDED, AND FAILED FILES ($($nonIncluded.Count) files)")
             $reportWriter.WriteLine("================================================================================")
             if ($nonIncluded.Count -eq 0)
             {
@@ -1584,7 +2074,7 @@ function Convert-ArchiveToText
             {
                 foreach ($item in $nonIncluded)
                 {
-                    $reportWriter.WriteLine("- $( $item.RelativePath ) [$( $item.Status )] -- $( $item.Reason )")
+                    $reportWriter.WriteLine("- $($item.RelativePath) [$($item.Status)] -- $($item.Reason)")
                 }
             }
             $reportWriter.WriteLine("")
@@ -1641,7 +2131,7 @@ function Convert-ArchiveToText
         }
         catch
         {
-            $errMsg = "Report generation succeeded in staging file '$stagingReportPath', but moving it to '$resolvedOutputPath' failed: $( $_.Exception.Message ). The staging file has been preserved."
+            $errMsg = "Report generation succeeded in staging file '$stagingReportPath', but moving it to '$resolvedOutputPath' failed: $($_.Exception.Message). The staging file has been preserved."
             Write-Error -Message $errMsg -Category WriteError
             # Prevent finally block from deleting preserved staging file on finalization error
             $stagingReportPath = $null
@@ -1685,7 +2175,7 @@ function Convert-ArchiveToText
     finally
     {
         # Clean up temporary staging files if they still exist
-        foreach ($tmpFile in @($stagingReportPath, $stagingBodyPath, $sectionDTempPath))
+        foreach ($tmpFile in @($stagingReportPath, $sectionDTempPath))
         {
             if (-not [string]::IsNullOrWhiteSpace($tmpFile) -and (Test-Path -LiteralPath $tmpFile))
             {
@@ -1695,7 +2185,7 @@ function Convert-ArchiveToText
                 }
                 catch
                 {
-                    Write-Warning "Failed to clean up temporary staging file '$tmpFile': $( $_.Exception.Message )"
+                    Write-Warning "Failed to clean up temporary staging file '$tmpFile': $($_.Exception.Message)"
                 }
             }
         }
@@ -1709,7 +2199,7 @@ function Convert-ArchiveToText
             }
             catch
             {
-                Write-Warning "Failed to clean up temporary extraction directory '$tempExtractDir': $( $_.Exception.Message )"
+                Write-Warning "Failed to clean up temporary extraction directory '$tempExtractDir': $($_.Exception.Message)"
             }
         }
     }

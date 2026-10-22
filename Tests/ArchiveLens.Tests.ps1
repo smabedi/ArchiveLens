@@ -1,10 +1,23 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-Automated Pester v5 test suite for ArchiveLens.
-Uses isolated temporary directories and synthetic archives.
+Automated Pester test suite for ArchiveLens.
 #>
 
+# --- 1. DISCOVERY PHASE (Only used for -Skip conditions) ---
+$discoveryRoot = Split-Path -Path $PSScriptRoot -Parent
+Import-Module -Name (Join-Path -Path $discoveryRoot -ChildPath 'ArchiveLens.psd1') -Force
+$discovery7z = Find-SevenZipExecutable
+$Skip7z = [string]::IsNullOrWhiteSpace($discovery7z)
+$SkipZst = $true
+
+if (-not $Skip7z) {
+    if ((& $discovery7z i 2>&1 | Out-String) -match '(?i)\bzst\b') {
+        $SkipZst = $false
+    }
+}
+
+# --- 2. RUN PHASE (Full initialization for test execution) ---
 BeforeAll {
     $script:RepoRoot = Split-Path -Path $PSScriptRoot -Parent
     $script:ManifestPath = Join-Path -Path $script:RepoRoot -ChildPath 'ArchiveLens.psd1'
@@ -14,6 +27,8 @@ BeforeAll {
     Import-Module -Name $script:ManifestPath -Force -ErrorAction Stop
     Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+    $script:SevenZipExe = Find-SevenZipExecutable
 
     function New-TestZipFromHashtables
     {
@@ -25,7 +40,6 @@ BeforeAll {
             [AllowEmptyCollection()]
             [array]$Entries
         )
-
         $fs = [System.IO.File]::Open($ZipPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite)
         $archive = [System.IO.Compression.ZipArchive]::new($fs, [System.IO.Compression.ZipArchiveMode]::Create, $false)
         try
@@ -51,6 +65,28 @@ BeforeAll {
         {
             $archive.Dispose()
             $fs.Dispose()
+        }
+    }
+
+    function New-TestSourceTree
+    {
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$RootDir,
+
+            [Parameter(Mandatory = $true)]
+            [array]$Entries
+        )
+        [void][System.IO.Directory]::CreateDirectory($RootDir)
+        foreach ($item in $Entries)
+        {
+            $fullPath = Join-Path -Path $RootDir -ChildPath ($item.Path.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+            $parentDir = [System.IO.Path]::GetDirectoryName($fullPath)
+            if (-not (Test-Path -LiteralPath $parentDir -PathType Container))
+            {
+                [void][System.IO.Directory]::CreateDirectory($parentDir)
+            }
+            [System.IO.File]::WriteAllBytes($fullPath, $item.Bytes)
         }
     }
 }
@@ -95,13 +131,11 @@ Describe 'ArchiveLens Core Functionality' {
 
             $reportText | Should -Match 'SECTION A: REPORT HEADER AND SUMMARY'
             $reportText | Should -Match 'SECTION B: COMPLETE FILE INVENTORY'
-
             $reportText | Should -Match 'SECTION C: SKIPPED, EXCLUDED, AND FAILED FILES'
             $reportText | Should -Match 'SECTION D: READABLE FILE CONTENTS'
-
             $reportText | Should -Match 'SECTION E: FINAL STATUS'
 
-            # Verify deterministic ordering (README.md < a_folder/first.py < assets/icon.svg < z_folder/last.txt)
+            # Verify deterministic ordering (a_folder/first.py < assets/icon.svg < README.md < z_folder/last.txt)
             $idxReadme = $reportText.IndexOf('BEGIN FILE: README.md')
             $idxFirst = $reportText.IndexOf('BEGIN FILE: a_folder/first.py')
             $idxSvg = $reportText.IndexOf('BEGIN FILE: assets/icon.svg')
@@ -163,6 +197,191 @@ Describe 'ArchiveLens Core Functionality' {
         }
     }
 
+    Context '7-Zip Multi-Format Support (.7z, .tar, .gz, .tgz, .bz2, .xz, .zst)' {
+        It 'Extracts a .7z archive and reports ArchiveFormat as 7Z' -Skip:$Skip7z {
+            $srcDir = Join-Path $script:WorkDir 'src_7z'
+            $archivePath = Join-Path $script:WorkDir 'Bundle.7z'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestSourceTree -RootDir $srcDir -Entries @(
+                @{ Path = 'src/App.java'; Bytes = $utf8.GetBytes("public class App {}`n") },
+                @{ Path = 'README.md'; Bytes = $utf8.GetBytes("# 7Z Test`n") }
+            )
+
+            & $script:SevenZipExe a -t7z -bd -y -- $archivePath "$srcDir\*" | Out-Null
+            $LASTEXITCODE | Should -Be 0
+
+            $res = Convert-ArchiveToText -ArchivePath $archivePath -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.ArchiveFormat | Should -Be '7Z'
+            $res.DiscoveredCount | Should -Be 2
+            $res.IncludedCount | Should -Be 2
+
+            $report = [System.IO.File]::ReadAllText($res.OutputPath, $utf8)
+            $report | Should -Match 'Archive Format\s*:\s*7Z'
+            $report | Should -Match 'public class App \{\}'
+        }
+
+        It 'Extracts a standalone .tar archive and reports ArchiveFormat as TAR' -Skip:$Skip7z {
+            $srcDir = Join-Path $script:WorkDir 'src_tar'
+            $archivePath = Join-Path $script:WorkDir 'Bundle.tar'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestSourceTree -RootDir $srcDir -Entries @(
+                @{ Path = 'config/settings.json'; Bytes = $utf8.GetBytes("{`"ok`": true}`n") },
+                @{ Path = 'notes.txt'; Bytes = $utf8.GetBytes("TAR test file`n") }
+            )
+
+            & $script:SevenZipExe a -ttar -bd -y -- $archivePath "$srcDir\*" | Out-Null
+            $LASTEXITCODE | Should -Be 0
+
+            $res = Convert-ArchiveToText -ArchivePath $archivePath -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.ArchiveFormat | Should -Be 'TAR'
+            $res.IncludedCount | Should -Be 2
+            [System.IO.File]::ReadAllText($res.OutputPath, $utf8) | Should -Match 'TAR test file'
+        }
+
+        It 'Extracts compound .tar.gz and .tgz archives via two-stage extraction and strips .tar.gz for default OutputPath' -Skip:$Skip7z {
+            $srcDir = Join-Path $script:WorkDir 'src_targz'
+            $tarPath = Join-Path $script:WorkDir 'ReleasePkg.tar'
+            $tarGzPath = Join-Path $script:WorkDir 'ReleasePkg.tar.gz'
+            $tgzPath = Join-Path $script:WorkDir 'ReleaseShort.tgz'
+            $expectedTarGzOut = Join-Path $script:WorkDir 'ReleasePkg.txt'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestSourceTree -RootDir $srcDir -Entries @(
+                @{ Path = 'module/core.ps1'; Bytes = $utf8.GetBytes("Write-Host 'from tar.gz'`n") },
+                @{ Path = 'MANIFEST.txt'; Bytes = $utf8.GetBytes("v1.0`n") }
+            )
+
+            & $script:SevenZipExe a -ttar -bd -y -- $tarPath "$srcDir\*" | Out-Null
+            & $script:SevenZipExe a -tgzip -bd -y -- $tarGzPath $tarPath | Out-Null
+            Copy-Item -LiteralPath $tarGzPath -Destination $tgzPath -Force
+
+            # Test .tar.gz
+            $resTarGz = Convert-ArchiveToText -ArchivePath $tarGzPath -PassThru
+            $resTarGz.ExitCode | Should -Be 0
+            $resTarGz.ArchiveFormat | Should -Be 'TAR.GZ'
+            $resTarGz.OutputPath | Should -Be $expectedTarGzOut
+            $resTarGz.IncludedCount | Should -Be 2
+            [System.IO.File]::ReadAllText($expectedTarGzOut, $utf8) | Should -Match "Write-Host 'from tar\.gz'"
+
+            # Test .tgz
+            $resTgz = Convert-ArchiveToText -ArchivePath $tgzPath -PassThru
+            $resTgz.ExitCode | Should -Be 0
+            $resTgz.ArchiveFormat | Should -Be 'TGZ'
+            $resTgz.IncludedCount | Should -Be 2
+        }
+
+        It 'Extracts a standalone single-file .gz stream (non-TAR)' -Skip:$Skip7z {
+            $rawFile = Join-Path $script:WorkDir 'server.log'
+            $gzPath = Join-Path $script:WorkDir 'server.log.gz'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+            [System.IO.File]::WriteAllBytes($rawFile,$utf8.GetBytes("2026-10-22 INFO Server started`n"))
+
+            & $script:SevenZipExe a -tgzip -bd -y -- $gzPath $rawFile | Out-Null
+            Remove-Item -LiteralPath $rawFile -Force
+
+            $res = Convert-ArchiveToText -ArchivePath $gzPath -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.ArchiveFormat | Should -Be 'GZ'
+            $res.IncludedCount | Should -Be 1
+            [System.IO.File]::ReadAllText($res.OutputPath, $utf8) | Should -Match '2026-10-22 INFO Server started'
+        }
+
+        It 'Extracts compound .tar.bz2 and standalone .bz2 archives' -Skip:$Skip7z {
+            $srcDir = Join-Path $script:WorkDir 'src_bz2'
+            $tarPath = Join-Path $script:WorkDir 'Pkg.tar'
+            $tarBz2Path = Join-Path $script:WorkDir 'Pkg.tar.bz2'
+            $expectedOut = Join-Path $script:WorkDir 'Pkg.txt'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestSourceTree -RootDir $srcDir -Entries @(
+                @{ Path = 'bzip_test.txt'; Bytes = $utf8.GetBytes("Hello from BZip2 TAR`n") }
+            )
+
+            & $script:SevenZipExe a -ttar -bd -y -- $tarPath "$srcDir\*" | Out-Null
+            & $script:SevenZipExe a -tbzip2 -bd -y -- $tarBz2Path $tarPath | Out-Null
+
+            $res = Convert-ArchiveToText -ArchivePath $tarBz2Path -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.ArchiveFormat | Should -Be 'TAR.BZ2'
+            $res.OutputPath | Should -Be $expectedOut
+            $res.IncludedCount | Should -Be 1
+            [System.IO.File]::ReadAllText($expectedOut, $utf8) | Should -Match 'Hello from BZip2 TAR'
+        }
+
+        It 'Extracts compound .tar.xz and standalone .xz archives' -Skip:$Skip7z {
+            $srcDir = Join-Path $script:WorkDir 'src_xz'
+            $tarPath = Join-Path $script:WorkDir 'XzBundle.tar'
+            $tarXzPath = Join-Path $script:WorkDir 'XzBundle.tar.xz'
+            $expectedOut = Join-Path $script:WorkDir 'XzBundle.txt'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestSourceTree -RootDir $srcDir -Entries @(
+                @{ Path = 'xz_note.md'; Bytes = $utf8.GetBytes("# XZ Compression Works`n") }
+            )
+
+            & $script:SevenZipExe a -ttar -bd -y -- $tarPath "$srcDir\*" | Out-Null
+            & $script:SevenZipExe a -txz -bd -y -- $tarXzPath $tarPath | Out-Null
+
+            $res = Convert-ArchiveToText -ArchivePath $tarXzPath -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.ArchiveFormat | Should -Be 'TAR.XZ'
+            $res.OutputPath | Should -Be $expectedOut
+            $res.IncludedCount | Should -Be 1
+            [System.IO.File]::ReadAllText($expectedOut, $utf8) | Should -Match '# XZ Compression Works'
+        }
+
+        It 'Extracts compound .tar.zst and standalone .zst archives when supported by installed 7-Zip' -Skip:$SkipZst {
+            $srcDir = Join-Path $script:WorkDir 'src_zst'
+            $tarPath = Join-Path $script:WorkDir 'ZstBundle.tar'
+            $tarZstPath = Join-Path $script:WorkDir 'ZstBundle.tar.zst'
+            $expectedOut = Join-Path $script:WorkDir 'ZstBundle.txt'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestSourceTree -RootDir $srcDir -Entries @(
+                @{ Path = 'zst_file.txt'; Bytes = $utf8.GetBytes("Zstandard archive content`n") }
+            )
+
+            # 1. Create a standard TAR file using vanilla 7-Zip
+            & $script:SevenZipExe a -ttar -bd -y -- $tarPath "$srcDir\*" | Out-Null
+
+            # 2. Package the TAR into a valid, uncompressed Zstandard (ZST) Raw Block frame
+            $tarBytes = [System.IO.File]::ReadAllBytes($tarPath)
+            $L = $tarBytes.Length
+
+            $zstStream = [System.IO.MemoryStream]::new()
+            # Magic: 28 B5 2F FD | FHD: E0 (Single Segment, 8-byte FCS, No Checksum, No Dict)
+            $zstStream.Write([byte[]]@(0x28, 0xB5, 0x2F, 0xFD, 0xE0), 0, 5)
+            # FCS (8 bytes, Little Endian)
+            $zstStream.Write([BitConverter]::GetBytes([long]$L), 0, 8)
+
+            # Block Header: 3 bytes (Last_Block=1, Type=Raw_Block=0, Size=L)
+            $blockVal = ($L -shl 3) -bor 1
+            $zstStream.Write([byte[]]@(
+                [byte]($blockVal -band 0xFF),
+                [byte](($blockVal -shr 8) -band 0xFF),
+                [byte](($blockVal -shr 16) -band 0xFF)
+            ), 0, 3)
+
+            # Block Content
+            $zstStream.Write($tarBytes, 0, $L)
+
+            [System.IO.File]::WriteAllBytes($tarZstPath, $zstStream.ToArray())
+            $zstStream.Dispose()
+
+            # 3. Test extraction
+            $res = Convert-ArchiveToText -ArchivePath $tarZstPath -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.ArchiveFormat | Should -Be 'TAR.ZST'
+            $res.OutputPath | Should -Be $expectedOut
+            $res.IncludedCount | Should -Be 1
+            [System.IO.File]::ReadAllText($expectedOut, $utf8) | Should -Match 'Zstandard archive content'
+        }
+    }
+
     Context 'Unicode, Persian, Arabic, and Encoding Detection' {
         It 'Correctly decodes UTF-8 (no BOM), UTF-8 (BOM), UTF-16 LE, and UTF-16 BE with Persian and Arabic text' {
             $zipPath = Join-Path $script:WorkDir 'UnicodeSuite.zip'
@@ -210,13 +429,11 @@ Describe 'ArchiveLens Core Functionality' {
             $res.IncludedCount | Should -Be 1
             $report = [System.IO.File]::ReadAllText($res.OutputPath)
             $report | Should -Match 'BEGIN FILE: policies/firewall\.customdsl'
-
             $report | Should -Match 'rule allow_all'
         }
 
         It 'Rejects a binary file disguised with a .txt extension (contains NUL or binary control bytes)' {
             $zipPath = Join-Path $script:WorkDir 'DisguisedBinary.zip'
-            # Valid ASCII prefix followed by NUL and control characters
             $fakeTxtBytes = [byte[]]@(0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x00, 0x01, 0x02, 0x03, 0x04, 0xFF, 0xFE)
 
             New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
@@ -230,9 +447,27 @@ Describe 'ArchiveLens Core Functionality' {
             $report | Should -Match 'notes\.txt \[Skipped\s*\] -- Unrecognized binary data'
         }
 
+        It 'Detects disguised 7z, XZ, ZST, and BZip2 magic headers even when given a .txt extension' {
+            $zipPath = Join-Path $script:WorkDir 'MagicDisguised.zip'
+            New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
+                @{ Path = 'fake_7z.txt'; Bytes = [byte[]]@(0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C, 0x00, 0x04) },
+                @{ Path = 'fake_xz.txt'; Bytes = [byte[]]@(0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00, 0x01) },
+                @{ Path = 'fake_zst.txt'; Bytes = [byte[]]@(0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x00, 0x00, 0x00) },
+                @{ Path = 'fake_bz2.txt'; Bytes = [byte[]]@(0x42, 0x5A, 0x68, 0x39, 0x31, 0x41, 0x59, 0x26) }
+            )
+
+            $res = Convert-ArchiveToText -ArchivePath $zipPath -PassThru
+            $res.IncludedCount | Should -Be 0
+            $res.SkippedCount | Should -Be 4
+            $report = [System.IO.File]::ReadAllText($res.OutputPath)
+            $report | Should -Match '7-Zip archive signature'
+            $report | Should -Match 'XZ compressed signature'
+            $report | Should -Match 'Zstandard \(ZST\) compressed signature'
+            $report | Should -Match 'BZip2 compressed signature'
+        }
+
         It 'Flags invalid UTF-8 as Failed (Partial Success exit code 2) when fallback encoding is disabled' {
             $zipPath = Join-Path $script:WorkDir 'InvalidUtf8.zip'
-            # Invalid UTF-8 continuation bytes without NULs
             $badUtf8 = [byte[]]@(0x41, 0x42, 0xC0, 0xAF, 0xFE, 0xFF, 0x43)
 
             New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
@@ -317,7 +552,6 @@ Describe 'ArchiveLens Core Functionality' {
             { Convert-ArchiveToText -ArchivePath $zipPath -OutputPath $outPath -ErrorAction Stop } | Should -Throw '*already exists*'
             [System.IO.File]::ReadAllText($outPath) | Should -Be 'EXISTING_PROTECTED_CONTENT'
 
-            # Now overwrite with -Force
             $res = Convert-ArchiveToText -ArchivePath $zipPath -OutputPath $outPath -Force -PassThru
             $res.ExitCode | Should -Be 0
             [System.IO.File]::ReadAllText($outPath) | Should -Match 'ARCHIVELENS INSPECTION REPORT'
@@ -372,12 +606,14 @@ Describe 'ArchiveLens Core Functionality' {
             { Convert-ArchiveToText -ArchivePath $zipPath -MaxEntryCount 2 -ErrorAction Stop } | Should -Throw '*exceeds the configured safety limit*'
         }
 
-        It 'Produces a clear actionable error for .rar when 7-Zip is unavailable' {
-            $fakeRar = Join-Path $script:WorkDir 'Sample.rar'
-            [System.IO.File]::WriteAllBytes($fakeRar, [byte[]]@(0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00))
+        It 'Produces a clear actionable error for 7-Zip formats (.rar, .7z, .tar, .gz, .tgz, .bz2, .xz, .zst) when 7-Zip is unavailable' {
             $nonExistent7z = Join-Path $script:WorkDir 'missing_7z.exe'
-
-            { Convert-ArchiveToText -ArchivePath $fakeRar -SevenZipPath $nonExistent7z -ErrorAction Stop } | Should -Throw '*7-Zip*'
+            foreach ($ext in @('.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst'))
+            {
+                $fakeArchive = Join-Path $script:WorkDir ("Sample" + $ext)
+                [System.IO.File]::WriteAllBytes($fakeArchive, [byte[]]@(0x00, 0x01, 0x02, 0x03))
+                { Convert-ArchiveToText -ArchivePath $fakeArchive -SevenZipPath $nonExistent7z -ErrorAction Stop } | Should -Throw '*7-Zip*'
+            }
         }
     }
 
@@ -392,12 +628,12 @@ Describe 'ArchiveLens Core Functionality' {
             $pwshExe = (Get-Process -Id $PID).Path
 
             # Run 1: Should Succeed
-            $args1 = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:CliScriptPath, $zipPath)
+            $args1 = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script:CliScriptPath`"", "`"$zipPath`"")
             $p1 = Start-Process -FilePath $pwshExe -ArgumentList $args1 -Wait -NoNewWindow -PassThru
             $p1.ExitCode | Should -Be 0
 
             # Run 2: Should Fail (file already exists, no -Force)
-            $args2 = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script:CliScriptPath, $zipPath)
+            $args2 = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$script:CliScriptPath`"", "`"$zipPath`"")
             $p2 = Start-Process -FilePath $pwshExe -ArgumentList $args2 -Wait -NoNewWindow -PassThru
             $p2.ExitCode | Should -Be 1
         }

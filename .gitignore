@@ -11,6 +11,7 @@ Desktop.ini
 *.tmp
 .[ArchiveLens-*].tmp
 TestResults*.xml
+ArchiveLens.iml
 
 # Local test outputs
 /out/
