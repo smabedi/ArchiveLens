@@ -126,7 +126,7 @@ foreach ($file in $requiredFiles)
     }
 }
 
-Write-Host "Installing ArchiveLens v0.1.0 (per-user scope)..." -ForegroundColor Cyan
+Write-Host "Installing ArchiveLens v0.2.0 (per-user scope)..." -ForegroundColor Cyan
 
 # 1. Install to PowerShell 7 and Windows PowerShell 5.1 user module directories
 foreach ($modDir in $moduleTargets)

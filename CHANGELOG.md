@@ -5,6 +5,16 @@ All notable changes to **ArchiveLens** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-10-22
+
+### Added
+
+- Support for seven additional archive and compressed stream formats via 7-Zip (`7z.exe`): `.7z`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.xz`, and `.zst`.
+- Automatic two-stage extraction and pre-inspection for compound TAR archives (`.tar.gz`, `.tgz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`, as well as any `.gz`/`.bz2`/`.xz`/`.zst` stream whose inner payload carries a POSIX `ustar` header).
+- Smart default output path resolution (`Get-ArchiveDefaultOutputPath`) that strips full compound `.tar.*` suffixes (e.g., `Project.tar.gz` -> `Project.txt`).
+- Post-extraction disk size and entry count verification in `Invoke-SevenZipSinglePass` to guard against compressed stream formats that omit uncompressed length metadata in headers.
+- Magic binary signatures in `Test-MagicBinarySignature` for 7-Zip (`7z`), XZ (`FD 37 7A 58 5A 00`), Zstandard (`28 B5 2F FD`), BZip2 (`BZh`), and POSIX TAR (`ustar`).
+
 ## [0.1.0] - 2026-10-20
 
 ### Added
