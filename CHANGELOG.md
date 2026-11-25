@@ -5,6 +5,16 @@ All notable changes to **ArchiveLens** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-26
+
+### Added
+- Fast Inventory / Dry-Run Mode (`-ListOnly`). Scans and inspects archives directly to console output without extracting file contents into the final report.
+- Deep Classification Modifier (`-DeepScan`). When combined with `-ListOnly`, temporarily extracts the archive to run strict byte-level magic signature and encoding checks without dumping text contents into the final output.
+- Parameter `-SaveReport` to complement `-ListOnly`, enabling disk file generation of the structural report without full content embedding.
+- Internal optimization: ZIP entries are inspected purely via `[System.IO.Compression.ZipArchive]::OpenRead()` and 7-Zip processing utilizes `l -slt` strictly for pre-pass metadata checks.
+    - *Note on Footprint:* For direct containers (`.zip`, `.rar`, `.7z`, `.tar`), a standard `-ListOnly` avoids the file system entirely. Compound streams (like `.tar.gz`) still require a temporary outer-layer extraction to safely inspect the inner `.tar` payload.
+    - *Note on Classification:* Because standard dry-runs avoid disk extraction, files are marked as `Unverified` and classified using surface-level extension heuristics. Use `-ListOnly -DeepScan` to guarantee exact UTF encoding and disguised binary detection.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added
