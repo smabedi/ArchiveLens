@@ -133,21 +133,24 @@ ArchiveToText "C:\Releases\Source.tar.xz" "C:\Reports\SourceReport.txt" -Exclude
 
 ## Parameters
 
-| Parameter                   | Type       | Default          | Description                                                                                       |
-|:----------------------------|:-----------|:-----------------|:--------------------------------------------------------------------------------------------------|
-| `-ArchivePath`              | `string`   | *(Prompted)*     | Path to input archive (`.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.xz`, `.zst`).      |
-| `-OutputPath`               | `string`   | `<BaseName>.txt` | Destination path for the UTF-8 report (strips `.tar.*` suffixes automatically).                   |
-| `-SevenZipPath`             | `string`   | Auto-detected    | Explicit path to `7z.exe` for non-ZIP formats.                                                    |
-| `-IncludeGit`               | `switch`   | `$false`         | Includes files inside `.git/` directories (excluded by default).                                  |
-| `-ExcludeSensitive`         | `switch`   | `$false`         | Excludes common credential files (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.pfx`, `*.kdbx`, etc.). |
-| `-ExcludePattern`           | `string[]` | `@()`            | Wildcard patterns (e.g., `'*.min.js'`, `'node_modules/*'`) to exclude.                            |
-| `-MaxFileSizeMB`            | `int`      | `10`             | Maximum size (MB) for an individual file to be decoded as text (`1`–`500`).                       |
-| `-MaxTotalSizeMB`           | `int`      | `250`            | Maximum cumulative uncompressed archive size (MB) allowed (`1`–`10000`).                          |
-| `-MaxEntryCount`            | `int`      | `10000`          | Maximum archive entries allowed before aborting extraction (`1`–`500000`).                        |
-| `-FallbackEncodingCodePage` | `int`      | `1252`           | Fallback code page when strict UTF-8 fails (e.g., `1256` for Persian/Arabic; `0` to disable).     |
-| `-NoInteractive`            | `switch`   | `$false`         | Disables interactive `Read-Host` prompts when `-ArchivePath` is omitted.                          |
-| `-PassThru`                 | `switch`   | `$false`         | Emits a `PSCustomObject` with run counts, timestamps, status, and exit code.                      |
-| `-Force`                    | `switch`   | `$false`         | Overwrites `-OutputPath` if the file already exists.                                              |
+| Parameter                   | Type       | Default          | Description                                                                                         |
+|:----------------------------|:-----------|:-----------------|:----------------------------------------------------------------------------------------------------|
+| `-ArchivePath`              | `string`   | *(Prompted)*     | Path to input archive (`.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.xz`, `.zst`).        |
+| `-OutputPath`               | `string`   | `<BaseName>.txt` | Destination path for the UTF-8 report (strips `.tar.*` suffixes automatically).                     |
+| `-SevenZipPath`             | `string`   | Auto-detected    | Explicit path to `7z.exe` for non-ZIP formats.                                                      |
+| `-IncludeGit`               | `switch`   | `$false`         | Includes files inside `.git/` directories (excluded by default).                                    |
+| `-ExcludeSensitive`         | `switch`   | `$false`         | Excludes common credential files (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `*.pfx`, `*.kdbx`, etc.).   |
+| `-ExcludePattern`           | `string[]` | `@()`            | Wildcard patterns (e.g., `'*.min.js'`, `'node_modules/*'`) to exclude.                              |
+| `-MaxFileSizeMB`            | `int`      | `10`             | Maximum size (MB) for an individual file to be decoded as text (`1`–`500`).                         |
+| `-MaxTotalSizeMB`           | `int`      | `250`            | Maximum cumulative uncompressed archive size (MB) allowed (`1`–`10000`).                            |
+| `-MaxEntryCount`            | `int`      | `10000`          | Maximum archive entries allowed before aborting extraction (`1`–`500000`).                          |
+| `-FallbackEncodingCodePage` | `int`      | `1252`           | Fallback code page when strict UTF-8 fails (e.g., `1256` for Persian/Arabic; `0` to disable).       |
+| `-ListOnly`                 | `switch`   | `$false`         | Scans archive and outputs Section A and Section B to console without extracting contents.           |
+| `-DeepScan`                 | `switch`   | `$false`         | Modifies `-ListOnly` to perform a temporary extraction for precise, byte-level file classification. |
+| `-SaveReport`               | `switch`   | `$false`         | When used with `-ListOnly`, writes the inventory report to `-OutputPath`.                           |
+| `-NoInteractive`            | `switch`   | `$false`         | Disables interactive `Read-Host` prompts when `-ArchivePath` is omitted.                            |
+| `-PassThru`                 | `switch`   | `$false`         | Emits a `PSCustomObject` with run counts, timestamps, status, and exit code.                        |
+| `-Force`                    | `switch`   | `$false`         | Overwrites `-OutputPath` if the file already exists.                                                |
 
 ---
 

@@ -22,6 +22,8 @@ BeforeAll {
     $script:RepoRoot = Split-Path -Path $PSScriptRoot -Parent
     $script:ManifestPath = Join-Path -Path $script:RepoRoot -ChildPath 'ArchiveLens.psd1'
     $script:CliScriptPath = Join-Path -Path $script:RepoRoot -ChildPath 'ArchiveToText.ps1'
+    $manifestData = Import-PowerShellDataFile -Path $script:ManifestPath
+    $script:CurrentVer = [string]$manifestData['ModuleVersion']
     $script:CmdLauncherPath = Join-Path -Path $script:RepoRoot -ChildPath 'ArchiveToText.cmd'
     $script:InstallScriptPath = Join-Path -Path $script:RepoRoot -ChildPath 'Install.ps1'
 
@@ -196,6 +198,87 @@ Describe 'ArchiveLens Core Functionality' {
             $content | Should -Match 'app\.exe \[Skipped\]'
             $content | Should -Match '\(No readable text files were included in this report\.\)'
         }
+
+        It 'Runs -ListOnly without creating any report file on disk and maintains exit codes' {
+            $zipPath = Join-Path $script:WorkDir 'ListOnlyTest.zip'
+            $outPath = Join-Path $script:WorkDir 'ListOnlyTest.txt'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
+                @{ Path = 'file1.txt'; Bytes = $utf8.GetBytes("content1") },
+                @{ Path = 'image.png'; Bytes = [byte[]]@(0x89, 0x50, 0x4E, 0x47) }
+            )
+
+            $res = Convert-ArchiveToText -ArchivePath $zipPath -OutputPath $outPath -ListOnly -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.DiscoveredCount | Should -Be 2
+            $res.IncludedCount | Should -Be 1
+            $res.SkippedCount | Should -Be 1
+
+            (Test-Path -LiteralPath $outPath) | Should -BeFalse
+        }
+
+        It 'Runs -ListOnly -SaveReport and generates the expected report file' {
+            $zipPath = Join-Path $script:WorkDir 'ListOnlySaveTest.zip'
+            $outPath = Join-Path $script:WorkDir 'ListOnlySaveTest.txt'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
+                @{ Path = 'notes.md'; Bytes = $utf8.GetBytes("notes here") },
+                @{ Path = 'bin.exe'; Bytes = [byte[]]@(0x4D, 0x5A, 0x00) }
+            )
+
+            $res = Convert-ArchiveToText -ArchivePath $zipPath -OutputPath $outPath -ListOnly -SaveReport -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.DiscoveredCount | Should -Be 2
+
+            (Test-Path -LiteralPath $outPath) | Should -BeTrue
+            $content = [System.IO.File]::ReadAllText($outPath)
+
+            $content | Should -Match 'SECTION A: REPORT HEADER'
+            $content | Should -Match 'SECTION B: COMPLETE FILE INVENTORY'
+            $content | Should -Not -Match 'SECTION D: READABLE FILE CONTENTS'
+            $content | Should -Match 'notes\.md'
+            $content | Should -Match 'bin\.exe'
+        }
+
+        It 'Runs -ListOnly -DeepScan and successfully classifies disguised binaries without extracting text to report' {
+            $zipPath = Join-Path $script:WorkDir 'DeepScanTest.zip'
+            $outPath = Join-Path $script:WorkDir 'DeepScanTest.txt'
+            $fakeTxtBytes = [byte[]]@(0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x00, 0x01, 0x02, 0x03, 0x04)
+
+            New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
+                @{ Path = 'disguised.txt'; Bytes = $fakeTxtBytes }
+            )
+
+            $res = Convert-ArchiveToText -ArchivePath $zipPath -OutputPath $outPath -ListOnly -DeepScan -SaveReport -PassThru
+            $res.IncludedCount | Should -Be 0
+            $res.SkippedCount | Should -Be 1
+
+            $content = [System.IO.File]::ReadAllText($outPath)
+            $content | Should -Match 'disguised\.txt \[Skipped\s*\] -- Unrecognized binary data'
+            $content | Should -Not -Match 'SECTION D: READABLE FILE CONTENTS'
+        }
+
+        It 'Permits -ListOnly to run cleanly without -Force even if the default report path already exists' {
+            $zipPath = Join-Path $script:WorkDir 'ListOnlyOverwrite.zip'
+            $outPath = Join-Path $script:WorkDir 'ListOnlyOverwrite.txt'
+            New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
+                @{ Path = 'dummy.txt'; Bytes = [byte[]]@(1, 2, 3) }
+            )
+
+            # Create a file at the target output path
+            [System.IO.File]::WriteAllText($outPath, "EXISTING PROTECTED CONTENT")
+
+            # This should NOT throw an error because -SaveReport is not active
+            $res = Convert-ArchiveToText -ArchivePath $zipPath -OutputPath $outPath -ListOnly -PassThru
+
+            $res.ExitCode | Should -Be 0
+            $res.OutputPath | Should -BeNullOrEmpty
+
+            # Verify the original file was completely untouched
+            [System.IO.File]::ReadAllText($outPath) | Should -Be 'EXISTING PROTECTED CONTENT'
+        }
     }
 
     Context '7-Zip Multi-Format Support (.7z, .tar, .gz, .tgz, .bz2, .xz, .zst)' {
@@ -333,6 +416,25 @@ Describe 'ArchiveLens Core Functionality' {
             $res.OutputPath | Should -Be $expectedOut
             $res.IncludedCount | Should -Be 1
             [System.IO.File]::ReadAllText($expectedOut, $utf8) | Should -Match '# XZ Compression Works'
+        }
+
+        It 'Resolves base filename as RelativePath for headerless single-stream archives during -ListOnly' -Skip:$Skip7z {
+            $rawFile = Join-Path $script:WorkDir 'StreamData.log'
+            $xzPath = Join-Path $script:WorkDir 'StreamData.log.xz'
+            $outPath = Join-Path $script:WorkDir 'StreamData.log.txt'
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+
+            [System.IO.File]::WriteAllBytes($rawFile, $utf8.GetBytes("headerless stream data"))
+            & $script:SevenZipExe a -txz -bd -y -- $xzPath $rawFile | Out-Null
+            Remove-Item -LiteralPath $rawFile -Force
+
+            # Run ListOnly and verify the empty path was safely fallback-named
+            $res = Convert-ArchiveToText -ArchivePath $xzPath -OutputPath $outPath -ListOnly -SaveReport -PassThru
+            $res.ExitCode | Should -Be 0
+            $res.IncludedCount | Should -Be 1
+
+            $report = [System.IO.File]::ReadAllText($outPath)
+            $report | Should -Match 'StreamData\.log'
         }
 
         It 'Extracts compound .tar.zst and standalone .zst archives when supported by installed 7-Zip' -Skip:$SkipZst {
@@ -607,6 +709,20 @@ Describe 'ArchiveLens Core Functionality' {
             { Convert-ArchiveToText -ArchivePath $zipPath -MaxEntryCount 2 -ErrorAction Stop } | Should -Throw '*exceeds the configured safety limit*'
         }
 
+        It 'Enforces -MaxTotalSizeMB safety limit even during -ListOnly dry-runs' {
+            $zipPath = Join-Path $script:WorkDir 'LargeDryRun.zip'
+
+            # Create a ZIP containing a 2 MB file
+            New-TestZipFromHashtables -ZipPath $zipPath -Entries @(
+                @{ Path = 'big_file.bin'; Bytes = New-Object byte[] 2MB }
+            )
+
+            # Cap the extraction at 1 MB. This should throw even in -ListOnly mode.
+            {
+                Convert-ArchiveToText -ArchivePath $zipPath -MaxTotalSizeMB 1 -ListOnly -ErrorAction Stop
+            } | Should -Throw '*exceeds the configured safety limit*'
+        }
+
         It 'Produces a clear actionable error for 7-Zip formats (.rar, .7z, .tar, .gz, .tgz, .bz2, .xz, .zst) when 7-Zip is unavailable' {
             $nonExistent7z = Join-Path $script:WorkDir 'missing_7z.exe'
             foreach ($ext in @('.rar', '.7z', '.tar', '.gz', '.tgz', '.bz2', '.xz', '.zst'))
@@ -668,7 +784,7 @@ Describe 'ArchiveLens Core Functionality' {
             }
         }
 
-        It 'Default Install: installs 0.3.0 into <ModuleRoot>\0.3.0 without touching existing version folders' {
+        It 'Default Install: installs the current version into its directory without touching existing version folders' {
             New-MockInstalledVersion -VersionString '0.1.0'
             New-MockInstalledVersion -VersionString '0.2.0'
             New-MockInstalledVersion -VersionString '1.0.0'
@@ -679,13 +795,13 @@ Describe 'ArchiveLens Core Functionality' {
             {
                 (Test-Path -LiteralPath (Join-Path $root '0.1.0\ArchiveLens.psd1')) | Should -BeTrue
                 (Test-Path -LiteralPath (Join-Path $root '0.2.0\ArchiveLens.psd1')) | Should -BeTrue
-                (Test-Path -LiteralPath (Join-Path $root '0.3.0\ArchiveLens.psd1')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root "$script:CurrentVer\ArchiveLens.psd1")) | Should -BeTrue
                 (Test-Path -LiteralPath (Join-Path $root '1.0.0\ArchiveLens.psd1')) | Should -BeTrue
             }
             (Test-Path -LiteralPath (Join-Path $script:MockCliBin 'ArchiveToText.cmd')) | Should -BeTrue
         }
 
-        It '-CleanInstall: installs 0.3.0 and deletes all other older and newer version folders' {
+        It '-CleanInstall: installs the current version and deletes all other older and newer version folders' {
             New-MockInstalledVersion -VersionString '0.1.0'
             New-MockInstalledVersion -VersionString '0.2.0'
             New-MockInstalledVersion -VersionString '1.0.0'
@@ -697,11 +813,11 @@ Describe 'ArchiveLens Core Functionality' {
                 (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
                 (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
                 (Test-Path -LiteralPath (Join-Path $root '1.0.0')) | Should -BeFalse
-                (Test-Path -LiteralPath (Join-Path $root '0.3.0\ArchiveLens.psd1')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root "$script:CurrentVer\ArchiveLens.psd1")) | Should -BeTrue
             }
         }
 
-        It '-RemoveOlderVersions: installs 0.3.0, deletes older versions (0.1.0, 0.2.0), and preserves newer versions (1.0.0)' {
+        It '-RemoveOlderVersions: installs the current version, deletes older versions (0.1.0, 0.2.0), and preserves newer versions (1.0.0)' {
             New-MockInstalledVersion -VersionString '0.1.0'
             New-MockInstalledVersion -VersionString '0.2.0'
             New-MockInstalledVersion -VersionString '1.0.0'
@@ -712,7 +828,7 @@ Describe 'ArchiveLens Core Functionality' {
             {
                 (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
                 (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
-                (Test-Path -LiteralPath (Join-Path $root '0.3.0\ArchiveLens.psd1')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root "$script:CurrentVer\ArchiveLens.psd1")) | Should -BeTrue
                 (Test-Path -LiteralPath (Join-Path $root '1.0.0\ArchiveLens.psd1')) | Should -BeTrue
             }
         }
@@ -728,7 +844,7 @@ Describe 'ArchiveLens Core Functionality' {
             {
                 (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeTrue
                 (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
-                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root $script:CurrentVer)) | Should -BeTrue
             }
             (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
         }
@@ -739,13 +855,13 @@ Describe 'ArchiveLens Core Functionality' {
             New-MockInstalledVersion -VersionString '0.2.0'
             New-MockInstalledVersion -VersionString '0.10.0'
 
-            & $script:InstallScriptPath -Uninstall -RemoveOlderThan 'V0.3.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            & $script:InstallScriptPath -Uninstall -RemoveOlderThan "V$script:CurrentVer" -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
 
             foreach ($root in $script:MockModuleRoots)
             {
                 (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
                 (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
-                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root $script:CurrentVer)) | Should -BeTrue
                 (Test-Path -LiteralPath (Join-Path $root '0.10.0')) | Should -BeTrue
             }
             (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
@@ -756,19 +872,19 @@ Describe 'ArchiveLens Core Functionality' {
             New-MockInstalledVersion -VersionString '0.1.0'
             New-MockInstalledVersion -VersionString '0.2.0'
 
-            # First remove <= 0.2.0 (0.3.0 still remains)
+            # First remove <= 0.2.0 (current version still remains)
             & $script:InstallScriptPath -Uninstall -RemoveOlderThanOrEqualTo 'v0.2.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
 
             foreach ($root in $script:MockModuleRoots)
             {
                 (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
                 (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeFalse
-                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root $script:CurrentVer)) | Should -BeTrue
             }
             (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
 
-            # Now remove target 0.3.0 -> zero versions remain -> CLI root must be automatically removed
-            & $script:InstallScriptPath -Uninstall -TargetVersion '0.3.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
+            # Now remove target current version -> zero versions remain -> CLI root must be automatically removed
+            & $script:InstallScriptPath -Uninstall -TargetVersion $script:CurrentVer -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath
 
             foreach ($root in $script:MockModuleRoots)
             {
@@ -808,12 +924,12 @@ Describe 'ArchiveLens Core Functionality' {
             {
                 (Test-Path -LiteralPath (Join-Path $root '0.1.0')) | Should -BeFalse
                 (Test-Path -LiteralPath (Join-Path $root '0.2.0')) | Should -BeTrue
-                (Test-Path -LiteralPath (Join-Path $root '0.3.0')) | Should -BeTrue
+                (Test-Path -LiteralPath (Join-Path $root $script:CurrentVer)) | Should -BeTrue
             }
             (Test-Path -LiteralPath $script:MockCliRoot) | Should -BeTrue
 
-            # 2. Remove <= 0.3.0 (deletes remaining 0.2.0 and 0.3.0 -> zero versions remain -> auto-cleans CLI root)
-            Uninstall-ArchiveLens -RemoveOlderThanOrEqualTo 'V0.3.0' -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath -KeepLoadedSession -Confirm:$false
+            # 2. Remove <= current version (deletes remaining 0.2.0 and current -> zero versions remain -> auto-cleans CLI root)
+            Uninstall-ArchiveLens -RemoveOlderThanOrEqualTo "V$script:CurrentVer" -ModuleRoots $script:MockModuleRoots -InstallRoot $script:MockCliRoot -SkipEnvironmentPath -KeepLoadedSession -Confirm:$false
 
             foreach ($root in $script:MockModuleRoots)
             {

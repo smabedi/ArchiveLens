@@ -26,19 +26,28 @@ param(
     [string[]]$ExcludePattern = @(),
 
     [Parameter()]
-    [int]$MaxFileSizeMB = 10,
+    [int]$MaxFileSizeMB,
 
     [Parameter()]
-    [int]$MaxTotalSizeMB = 250,
+    [int]$MaxTotalSizeMB,
 
     [Parameter()]
-    [int]$MaxEntryCount = 10000,
+    [int]$MaxEntryCount,
 
     [Parameter()]
-    [int]$FallbackEncodingCodePage = 1252,
+    [int]$FallbackEncodingCodePage,
 
     [Parameter()]
     [switch]$NoInteractive,
+
+    [Parameter()]
+    [switch]$ListOnly,
+
+    [Parameter()]
+    [switch]$DeepScan,
+
+    [Parameter()]
+    [switch]$SaveReport,
 
     [Parameter()]
     [switch]$Force
@@ -58,12 +67,13 @@ try
     Import-Module -Name $moduleManifest -Force -ErrorAction Stop
 
     $invokeParams = @{
-        MaxFileSizeMB = $MaxFileSizeMB
-        MaxTotalSizeMB = $MaxTotalSizeMB
-        MaxEntryCount = $MaxEntryCount
-        FallbackEncodingCodePage = $FallbackEncodingCodePage
         PassThru = $true
-    }
+    }`
+
+    if ( $PSBoundParameters.ContainsKey('MaxFileSizeMB')) { $invokeParams['MaxFileSizeMB'] = $MaxFileSizeMB }
+    if ( $PSBoundParameters.ContainsKey('MaxTotalSizeMB')) { $invokeParams['MaxTotalSizeMB'] = $MaxTotalSizeMB }
+    if ( $PSBoundParameters.ContainsKey('MaxEntryCount')) { $invokeParams['MaxEntryCount'] = $MaxEntryCount }
+    if ( $PSBoundParameters.ContainsKey('FallbackEncodingCodePage')) { $invokeParams['FallbackEncodingCodePage'] = $FallbackEncodingCodePage }
 
     if ( $PSBoundParameters.ContainsKey('ArchivePath'))
     {
@@ -96,6 +106,18 @@ try
     if ($Force.IsPresent)
     {
         $invokeParams['Force'] = $true
+    }
+    if ($ListOnly.IsPresent)
+    {
+        $invokeParams['ListOnly'] = $true
+    }
+    if ($DeepScan.IsPresent)
+    {
+        $invokeParams['DeepScan'] = $true
+    }
+    if ($SaveReport.IsPresent)
+    {
+        $invokeParams['SaveReport'] = $true
     }
     if ( $PSBoundParameters.ContainsKey('Verbose'))
     {

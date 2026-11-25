@@ -10,7 +10,7 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
 
 #region Constants & Known Classifications
 
-$script:ModuleVersion = '0.3.0'
+$script:ModuleVersion = '0.4.0'
 
 $script:ExitCodeSuccess = 0
 $script:ExitCodeFatalError = 1
@@ -415,6 +415,9 @@ function Expand-ZipArchiveSafely
         [Parameter(Mandatory = $true)]
         [string]$ArchivePath,
 
+        [Parameter()]
+        [switch]$ListOnly,
+
         [Parameter(Mandatory = $true)]
         [string]$DestinationDirectory,
 
@@ -426,6 +429,7 @@ function Expand-ZipArchiveSafely
     )
 
     $zip = $null
+    $discoveredEntries = [System.Collections.Generic.List[PSCustomObject]]::new()
     try
     {
         try
@@ -464,10 +468,13 @@ function Expand-ZipArchiveSafely
             # Skip directory entries (entries ending with / or \)
             if ($entryName.EndsWith('/') -or $entryName.EndsWith('\') -or ($entry.Length -eq 0 -and [string]::IsNullOrEmpty($entry.Name)))
             {
-                $dirTarget = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($normalizedRoot, $entryName.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
-                if (-not (Test-Path -LiteralPath $dirTarget -PathType Container))
+                if (-not $ListOnly)
                 {
-                    [void][System.IO.Directory]::CreateDirectory($dirTarget)
+                    $dirTarget = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($normalizedRoot, $entryName.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
+                    if (-not (Test-Path -LiteralPath $dirTarget -PathType Container))
+                    {
+                        [void][System.IO.Directory]::CreateDirectory($dirTarget)
+                    }
                 }
                 continue
             }
@@ -479,6 +486,12 @@ function Expand-ZipArchiveSafely
                 throw [System.InvalidOperationException]::new(
                         "Archive cumulative uncompressed size exceeds the configured safety limit of $limitMB MB (-MaxTotalSizeMB)."
                 )
+            }
+
+            if ($ListOnly)
+            {
+                $discoveredEntries.Add([PSCustomObject]@{ RelativePath = $entryName.Replace('\', '/'); SizeBytes = $entry.Length; IsReparse = $false })
+                continue
             }
 
             $targetFilePath = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($normalizedRoot,$entryName.Replace('/', [System.IO.Path]::DirectorySeparatorChar)))
@@ -533,6 +546,8 @@ function Expand-ZipArchiveSafely
                 }
             }
         }
+
+        if ($ListOnly) { return $discoveredEntries }
     }
     finally
     {
@@ -621,7 +636,10 @@ function Invoke-SevenZipSinglePass
         [int]$MaxEntryCount,
 
         [Parameter(Mandatory = $true)]
-        [long]$MaxTotalBytes
+        [long]$MaxTotalBytes,
+
+        [Parameter()]
+        [switch]$ListOnly
     )
 
     # Step 1: Pre-inspect archive entries using 7z technical listing ('l -slt')
@@ -645,8 +663,9 @@ function Invoke-SevenZipSinglePass
 
     $inHeader = $true
     $entryCount = 0
+    $discoveredEntries = [System.Collections.Generic.List[PSCustomObject]]::new()
     [long]$cumulativeBytes = 0
-    $currentPath = $null
+    [string]$currentPath = ''
     $currentIsDir = $false
 
     foreach ($lineObj in $listOutput)
@@ -730,9 +749,20 @@ function Invoke-SevenZipSinglePass
                             "$FormatLabel archive cumulative uncompressed size exceeds the configured safety limit of $limitMB MB (-MaxTotalSizeMB)."
                     )
                 }
+                $entryRelPath = if ([string]::IsNullOrWhiteSpace($currentPath))
+                {
+                    [System.IO.Path]::GetFileNameWithoutExtension($ArchivePath)
+                }
+                else
+                {
+                    $currentPath.Replace('\', '/')
+                }
+                $discoveredEntries.Add([PSCustomObject]@{ RelativePath = $entryRelPath; SizeBytes = $sizeVal; IsReparse = $false })
             }
         }
     }
+
+    if ($ListOnly) { return $discoveredEntries }
 
     # Step 2: Extract safely into the destination directory
     $outArg = "-o$DestinationDirectory"
@@ -802,7 +832,10 @@ function Expand-SevenZipArchiveSafely
         [int]$MaxEntryCount,
 
         [Parameter(Mandatory = $true)]
-        [long]$MaxTotalBytes
+        [long]$MaxTotalBytes,
+
+        [Parameter()]
+        [switch]$ListOnly
     )
 
     $formatLabel = $FormatInfo.Format
@@ -817,13 +850,15 @@ function Expand-SevenZipArchiveSafely
     if (-not $FormatInfo.IsStreamFormat)
     {
         # Direct container archive (.rar, .7z, .tar)
-        Invoke-SevenZipSinglePass `
+        $res = Invoke-SevenZipSinglePass `
             -ArchivePath $ArchivePath `
             -DestinationDirectory $DestinationDirectory `
             -SevenZipExe $sevenZipExe `
             -FormatLabel $formatLabel `
             -MaxEntryCount $MaxEntryCount `
-            -MaxTotalBytes $MaxTotalBytes
+            -MaxTotalBytes $MaxTotalBytes `
+            -ListOnly:$ListOnly
+        if ($ListOnly) { return $res }
         return
     }
 
@@ -856,20 +891,34 @@ function Expand-SevenZipArchiveSafely
             if ($isInnerTar)
             {
                 Write-Verbose "Detected inner TAR container '$($innerFile.Name)' inside $formatLabel stream; performing second-stage TAR extraction..."
-                Invoke-SevenZipSinglePass `
+                $res = Invoke-SevenZipSinglePass `
                     -ArchivePath $innerFile.FullName `
                     -DestinationDirectory $DestinationDirectory `
                     -SevenZipExe $sevenZipExe `
                     -FormatLabel "$formatLabel (inner TAR)" `
                     -MaxEntryCount $MaxEntryCount `
-                    -MaxTotalBytes $MaxTotalBytes
+                    -MaxTotalBytes $MaxTotalBytes `
+                    -ListOnly:$ListOnly
+                if ($ListOnly) { return $res }
                 return
             }
         }
 
+        $normalizedStageRoot = [System.IO.Path]::GetFullPath($stageDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+
+        if ($ListOnly)
+        {
+            $discoveredEntries = [System.Collections.Generic.List[PSCustomObject]]::new()
+            foreach ($sf in $stageFiles)
+            {
+                $rel = $sf.FullName.Substring($normalizedStageRoot.Length).Replace('\', '/')
+                $discoveredEntries.Add([PSCustomObject]@{ RelativePath = $rel; SizeBytes = $sf.Length; IsReparse = $false })
+            }
+            return $discoveredEntries
+        }
+
         # Not a TAR container (e.g., standalone file.txt.gz, script.ps1.xz, data.json.zst):
         # Move decompressed file(s) preserving relative structure into $DestinationDirectory
-        $normalizedStageRoot = [System.IO.Path]::GetFullPath($stageDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
         foreach ($sf in $stageFiles)
         {
             $rel = $sf.FullName.Substring($normalizedStageRoot.Length)
@@ -918,7 +967,10 @@ function Expand-RarArchiveSafely
         [int]$MaxEntryCount,
 
         [Parameter(Mandatory = $true)]
-        [long]$MaxTotalBytes
+        [long]$MaxTotalBytes,
+
+        [Parameter()]
+        [switch]$ListOnly
     )
 
     $rarInfo = @{
@@ -935,7 +987,8 @@ function Expand-RarArchiveSafely
         -SevenZipPath $SevenZipPath `
         -FormatInfo $rarInfo `
         -MaxEntryCount $MaxEntryCount `
-        -MaxTotalBytes $MaxTotalBytes
+        -MaxTotalBytes $MaxTotalBytes `
+        -ListOnly:$ListOnly
 }
 
 function Test-MagicBinarySignature
@@ -1555,6 +1608,15 @@ function Convert-ArchiveToText
     .PARAMETER FallbackEncodingCodePage
     Legacy Windows code page to try when strict UTF-8 decoding fails (e.g., 1252 for Western European, 1256 for Persian/Arabic). Pass 0 to disable fallback and require strict UTF encodings. Default is 1252.
 
+    .PARAMETER ListOnly
+    Scans archive and outputs Section A and Section B to console without extracting contents.
+
+    .PARAMETER DeepScan
+    Modifies -ListOnly to perform a temporary extraction for precise, byte-level file classification.
+
+    .PARAMETER SaveReport
+    When used with -ListOnly, writes the inventory report to -OutputPath.
+
     .PARAMETER NoInteractive
     Prevents interactive Read-Host prompts when ArchivePath is omitted.
 
@@ -1618,6 +1680,15 @@ function Convert-ArchiveToText
         [int]$FallbackEncodingCodePage = 1252,
 
         [Parameter()]
+        [switch]$ListOnly,
+
+        [Parameter()]
+        [switch]$DeepScan,
+
+        [Parameter()]
+        [switch]$SaveReport,
+
+        [Parameter()]
         [switch]$NoInteractive,
 
         [Parameter()]
@@ -1634,6 +1705,13 @@ function Convert-ArchiveToText
     $tempExtractDir = $null
 
     # 1. Interactive prompt handling when ArchivePath is omitted
+    $isListOnly = $ListOnly.IsPresent
+    $isDeepScan = $DeepScan.IsPresent
+    $isSaveReport = $SaveReport.IsPresent
+
+    if ($isDeepScan -and -not $isListOnly) {
+        Write-Warning "The -DeepScan parameter is designed to modify -ListOnly. Proceeding with a standard full extraction."
+    }
     $promptedInteractively = $false
     if ( [string]::IsNullOrWhiteSpace($ArchivePath))
     {
@@ -1738,8 +1816,8 @@ function Convert-ArchiveToText
         throw [System.ArgumentException]::new($errMsg)
     }
 
-    # Protect existing output file unless -Force is supplied
-    if ((Test-Path -LiteralPath $resolvedOutputPath -PathType Leaf) -and -not $Force)
+    # Protect existing output file unless -Force is supplied (only when writing a report to disk)
+    if ((-not $isListOnly -or $isSaveReport) -and (Test-Path -LiteralPath $resolvedOutputPath -PathType Leaf) -and -not $Force)
     {
         $errMsg = "Output file '$resolvedOutputPath' already exists. Supply -Force to overwrite it, or specify a different -OutputPath."
         Write-Error -Message $errMsg -Category ResourceExists
@@ -1783,11 +1861,12 @@ function Convert-ArchiveToText
     try
     {
         # Test destination writability before doing expensive extraction
-        try
-        {
-            $testStream = [System.IO.File]::Open($stagingReportPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-            $testStream.Dispose()
-        }
+        if (-not $isListOnly -or $isSaveReport) {
+            try
+            {
+                $testStream = [System.IO.File]::Open($stagingReportPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+                $testStream.Dispose()
+            }
         catch [System.UnauthorizedAccessException]
         {
             $fallbackSuggestion = Join-Path -Path ([Environment]::GetFolderPath('MyDocuments')) -ChildPath ([System.IO.Path]::GetFileName($resolvedOutputPath))
@@ -1801,64 +1880,75 @@ function Convert-ArchiveToText
             Write-Error -Message $errMsg -Category WriteError
             throw
         }
+        }
 
         # Create isolated extraction directory
-        [void][System.IO.Directory]::CreateDirectory($tempExtractDir)
-        Write-Verbose "Created temporary extraction directory: $tempExtractDir"
+        if (-not $isListOnly -or $isDeepScan -or $formatInfo.IsStreamFormat) {
+            [void][System.IO.Directory]::CreateDirectory($tempExtractDir)
+            Write-Verbose "Created temporary extraction directory: $tempExtractDir"
+        }
 
         # 4. Extract archive safely
         Write-Verbose "Extracting $archiveFormat archive '$resolvedArchivePath'..."
+        $listRes = $null
         if (-not $formatInfo.RequiresSevenZip)
         {
-            Expand-ZipArchiveSafely `
+            $listRes = Expand-ZipArchiveSafely `
                 -ArchivePath $resolvedArchivePath `
                 -DestinationDirectory $tempExtractDir `
                 -MaxEntryCount $MaxEntryCount `
-                -MaxTotalBytes $maxTotalBytes
+                -MaxTotalBytes $maxTotalBytes `
+                -ListOnly:($isListOnly -and -not $isDeepScan)
         }
         else
         {
-            Expand-SevenZipArchiveSafely `
+            $listRes = Expand-SevenZipArchiveSafely `
                 -ArchivePath $resolvedArchivePath `
                 -DestinationDirectory $tempExtractDir `
                 -SevenZipPath $SevenZipPath `
                 -FormatInfo $formatInfo `
                 -MaxEntryCount $MaxEntryCount `
-                -MaxTotalBytes $maxTotalBytes
+                -MaxTotalBytes $maxTotalBytes `
+                -ListOnly:($isListOnly -and -not $isDeepScan)
         }
 
         # 5. Discover all extracted files (including hidden dotfiles like .env and .gitignore)
-        $normalizedExtractRoot = [System.IO.Path]::GetFullPath($tempExtractDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
-        $rawFiles = @(Get-ChildItem -LiteralPath $tempExtractDir -File -Recurse -Force -ErrorAction Stop)
-
-        # Build deterministically sorted list by normalized archive-relative path (en-US culture sort)
         $discoveredEntries = [System.Collections.Generic.List[object]]::new()
-        foreach ($f in $rawFiles)
-        {
-            # Verify no extracted file is a reparse point / symlink escaping root
-            if (($f.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+
+        if ($isListOnly -and -not $isDeepScan) {
+            if ($null -ne $listRes) {
+                foreach ($item in $listRes) { $discoveredEntries.Add($item) }
+            }
+        } else {
+            $normalizedExtractRoot = [System.IO.Path]::GetFullPath($tempExtractDir).TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+            $rawFiles = @(Get-ChildItem -LiteralPath $tempExtractDir -File -Recurse -Force -ErrorAction Stop)
+
+            foreach ($f in $rawFiles)
             {
-                $relPath = $f.FullName.Substring($normalizedExtractRoot.Length).Replace('\', '/')
+                if (($f.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+                {
+                    $relPath = $f.FullName.Substring($normalizedExtractRoot.Length).Replace('\', '/')
+                    $discoveredEntries.Add([PSCustomObject]@{
+                        RelativePath = $relPath
+                        FileInfo = $f
+                        IsReparse = $true
+                    })
+                    continue
+                }
+
+                $fullFile = [System.IO.Path]::GetFullPath($f.FullName)
+                if (-not $fullFile.StartsWith($normalizedExtractRoot, [System.StringComparison]::OrdinalIgnoreCase))
+                {
+                    throw [System.Security.SecurityException]::new("Security violation: Extracted file '$fullFile' resides outside extraction root.")
+                }
+
+                $relPath = $fullFile.Substring($normalizedExtractRoot.Length).Replace('\', '/')
                 $discoveredEntries.Add([PSCustomObject]@{
                     RelativePath = $relPath
                     FileInfo = $f
-                    IsReparse = $true
+                    IsReparse = $false
                 })
-                continue
             }
-
-            $fullFile = [System.IO.Path]::GetFullPath($f.FullName)
-            if (-not $fullFile.StartsWith($normalizedExtractRoot, [System.StringComparison]::OrdinalIgnoreCase))
-            {
-                throw [System.Security.SecurityException]::new("Security violation: Extracted file '$fullFile' resides outside extraction root.")
-            }
-
-            $relPath = $fullFile.Substring($normalizedExtractRoot.Length).Replace('\', '/')
-            $discoveredEntries.Add([PSCustomObject]@{
-                RelativePath = $relPath
-                FileInfo = $f
-                IsReparse = $false
-            })
         }
 
         $sortedEntries = @($discoveredEntries | Sort-Object -Property { $_.RelativePath } -Culture 'en-US')
@@ -1873,33 +1963,81 @@ function Convert-ArchiveToText
             {
                 $inventoryList.Add(@{
                     RelativePath = $item.RelativePath
-                    FullName = $item.FileInfo.FullName
+                    FullName = if ($isListOnly) { '' } else { $item.FileInfo.FullName }
                     SizeBytes = 0L
                     Status = 'Skipped'
                     Encoding = '-'
                     Reason = 'Skipped symbolic link / reparse point for safety'
-                    LastWriteUtc = $item.FileInfo.LastWriteTimeUtc
+                    LastWriteUtc = if ($isListOnly) { $null } else { $item.FileInfo.LastWriteTimeUtc }
                 })
                 continue
             }
 
-            $totalBytesScanned += $item.FileInfo.Length
+            if ($isListOnly -and -not $isDeepScan) {
+                $totalBytesScanned += $item.SizeBytes
+                $status = 'Text'
+                $reason = 'Assumed Text (Pending Extraction)'
+                $ext = [System.IO.Path]::GetExtension($item.RelativePath)
 
-            $classification = Read-AndClassifyFile `
-                -FileInfo $item.FileInfo `
-                -RelativePath $item.RelativePath `
-                -IncludeGit $IncludeGit.IsPresent `
-                -ExcludeSensitive $ExcludeSensitive.IsPresent `
-                -ExcludePattern $ExcludePattern `
-                -MaxFileBytes $maxFileBytes `
-                -FallbackEncodingCodePage $FallbackEncodingCodePage `
-                -MetadataOnly $true
+                if (-not $IncludeGit -and $item.RelativePath -match '(^|/)\.git(/|$)') {
+                    $status = 'Excluded'; $reason = 'Excluded by default (.git directory)'
+                } else {
+                    $excludedByPattern = $false
+                    if ($null -ne $ExcludePattern -and $ExcludePattern.Count -gt 0) {
+                        foreach ($pattern in $ExcludePattern) {
+                            if (-not [string]::IsNullOrWhiteSpace($pattern) -and ($item.RelativePath -like $pattern -or [System.IO.Path]::GetFileName($item.RelativePath) -like $pattern)) {
+                                $status = 'Excluded'; $reason = "Matched user exclusion pattern '$pattern'"; $excludedByPattern = $true; break
+                            }
+                        }
+                    }
+                    if (-not $excludedByPattern -and $ExcludeSensitive) {
+                        foreach ($sensPattern in $script:SensitiveFilePatterns) {
+                            if ([System.IO.Path]::GetFileName($item.RelativePath) -like $sensPattern -or $item.RelativePath -like $sensPattern) {
+                                $status = 'Excluded'; $reason = "Excluded as potentially sensitive file ('$sensPattern')"; $excludedByPattern = $true; break
+                            }
+                        }
+                    }
+                    if (-not $excludedByPattern) {
+                        if (-not [string]::IsNullOrEmpty($ext) -and $script:KnownBinaryExtensions.Contains($ext)) {
+                            $status = 'Skipped'; $reason = "Known binary file extension ($($ext.ToLowerInvariant()))"
+                        } elseif ($item.SizeBytes -gt $maxFileBytes) {
+                            $limitMB = [Math]::Round($maxFileBytes / 1MB, 2)
+                            $actualMB = [Math]::Round($item.SizeBytes / 1MB, 2)
+                            $status = 'Skipped'; $reason = "File size ($actualMB MB) exceeds maximum per-file limit of $limitMB MB"
+                        } elseif ($item.SizeBytes -eq 0) {
+                            $status = 'Text'; $reason = 'Included (empty file)'
+                        }
+                    }
+                }
 
-            $inventoryList.Add($classification)
+                $inventoryList.Add(@{
+                    RelativePath = $item.RelativePath
+                    FullName = ''
+                    SizeBytes = $item.SizeBytes
+                    Status = $status
+                    Encoding = if ($status -eq 'Text') { 'Unverified' } else { '-' }
+                    Reason = $reason
+                    LastWriteUtc = $null
+                })
+            } else {
+                $totalBytesScanned += $item.FileInfo.Length
+                $classification = Read-AndClassifyFile `
+                    -FileInfo $item.FileInfo `
+                    -RelativePath $item.RelativePath `
+                    -IncludeGit $IncludeGit.IsPresent `
+                    -ExcludeSensitive $ExcludeSensitive.IsPresent `
+                    -ExcludePattern $ExcludePattern `
+                    -MaxFileBytes $maxFileBytes `
+                    -FallbackEncodingCodePage $FallbackEncodingCodePage `
+                    -MetadataOnly $true
+
+                $inventoryList.Add($classification)
+            }
         }
 
         # 7. Pass 2: Stream Section D (Readable File Contents) into temporary body file so any late read failure updates inventory BEFORE writing Section B & C
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        if (-not $isListOnly) {
         $sectionDTempPath = Join-Path -Path $outputDirectory -ChildPath (".[ArchiveLens-secD-$runId].tmp")
 
         $secDWriter = [System.IO.StreamWriter]::new($sectionDTempPath, $false, $utf8NoBom, 65536)
@@ -1990,6 +2128,7 @@ function Convert-ArchiveToText
         {
             $secDWriter.Dispose()
         }
+        }
 
         # 8. Compute Final Definitive Counts
         $totalDiscovered = $inventoryList.Count
@@ -2010,7 +2149,14 @@ function Convert-ArchiveToText
         $completionTimeUtc = [DateTime]::UtcNow
 
         # 9. Write Final Combined Report to $stagingReportPath (Sections A, B, C, D, E)
-        $reportWriter = [System.IO.StreamWriter]::new($stagingReportPath, $false, $utf8NoBom, 65536)
+        $reportWriter = $null
+        $reportSb = $null
+        if ($isListOnly) {
+            $reportSb = [System.Text.StringBuilder]::new()
+            $reportWriter = [System.IO.StringWriter]::new($reportSb)
+        } else {
+            $reportWriter = [System.IO.StreamWriter]::new($stagingReportPath, $false, $utf8NoBom, 65536)
+        }
         try
         {
             $reportWriter.NewLine = "`n"
@@ -2024,7 +2170,8 @@ function Convert-ArchiveToText
             $reportWriter.WriteLine("Product            : ArchiveLens v$($script:ModuleVersion)")
             $reportWriter.WriteLine("Input Archive      : $resolvedArchivePath")
             $reportWriter.WriteLine("Archive Format     : $archiveFormat")
-            $reportWriter.WriteLine("Output Report Path : $resolvedOutputPath")
+            $reportOutputDisplay = if ($isListOnly -and -not $isSaveReport) { '(Console Only - Not Saved)' } else { $resolvedOutputPath }
+            $reportWriter.WriteLine("Output Report Path : $reportOutputDisplay")
             $reportWriter.WriteLine("Start Time (UTC)   : $($startTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ'))")
             $reportWriter.WriteLine("End Time (UTC)     : $($completionTimeUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ'))")
             $reportWriter.WriteLine("Total Files Found  : $totalDiscovered")
@@ -2080,20 +2227,21 @@ function Convert-ArchiveToText
             $reportWriter.WriteLine("")
 
             # SECTION D: Copy from $sectionDTempPath
-            $reportWriter.Flush()
-
-            $secDReader = [System.IO.StreamReader]::new($sectionDTempPath, $utf8NoBom)
-            try
-            {
-                $charBuf = New-Object char[] 65536
-                while (($charsRead = $secDReader.Read($charBuf, 0, $charBuf.Length)) -gt 0)
+            if (-not $isListOnly) {
+                $reportWriter.Flush()
+                $secDReader = [System.IO.StreamReader]::new($sectionDTempPath, $utf8NoBom)
+                try
                 {
-                    $reportWriter.Write($charBuf, 0, $charsRead)
+                    $charBuf = New-Object char[] 65536
+                    while (($charsRead = $secDReader.Read($charBuf, 0, $charBuf.Length)) -gt 0)
+                    {
+                        $reportWriter.Write($charBuf, 0, $charsRead)
+                    }
                 }
-            }
-            finally
-            {
-                $secDReader.Dispose()
+                finally
+                {
+                    $secDReader.Dispose()
+                }
             }
 
             # SECTION E: Final Status
@@ -2110,32 +2258,42 @@ function Convert-ArchiveToText
             $reportWriter.Dispose()
         }
 
+        if ($isListOnly) {
+            $outStr = $reportSb.ToString()
+            $outStr -split "`n" | ForEach-Object { Write-Host $_.TrimEnd("`r") }
+            if ($isSaveReport) {
+                [System.IO.File]::WriteAllText($stagingReportPath, $outStr, $utf8NoBom)
+            }
+        }
+
         # Remove temporary Section D file before atomic finalization
-        if (Test-Path -LiteralPath $sectionDTempPath)
+        if ($null -ne $sectionDTempPath -and (Test-Path -LiteralPath $sectionDTempPath))
         {
             Remove-Item -LiteralPath $sectionDTempPath -Force -ErrorAction SilentlyContinue
         }
 
         # 10. Finalize output report atomically
-        try
-        {
-            if (Test-Path -LiteralPath $resolvedOutputPath -PathType Leaf)
+        if (-not $isListOnly -or $isSaveReport) {
+            try
             {
-                if (-not $Force)
+                if (Test-Path -LiteralPath $resolvedOutputPath -PathType Leaf)
                 {
-                    throw [System.IO.IOException]::new("Output file '$resolvedOutputPath' was created concurrently and -Force was not specified.")
+                    if (-not $Force)
+                    {
+                        throw [System.IO.IOException]::new("Output file '$resolvedOutputPath' was created concurrently and -Force was not specified.")
+                    }
+                    Remove-Item -LiteralPath $resolvedOutputPath -Force -ErrorAction Stop
                 }
-                Remove-Item -LiteralPath $resolvedOutputPath -Force -ErrorAction Stop
+                Move-Item -LiteralPath $stagingReportPath -Destination $resolvedOutputPath -Force -ErrorAction Stop
             }
-            Move-Item -LiteralPath $stagingReportPath -Destination $resolvedOutputPath -Force -ErrorAction Stop
-        }
-        catch
-        {
-            $errMsg = "Report generation succeeded in staging file '$stagingReportPath', but moving it to '$resolvedOutputPath' failed: $($_.Exception.Message). The staging file has been preserved."
-            Write-Error -Message $errMsg -Category WriteError
-            # Prevent finally block from deleting preserved staging file on finalization error
-            $stagingReportPath = $null
-            throw
+            catch
+            {
+                $errMsg = "Report generation succeeded in staging file '$stagingReportPath', but moving it to '$resolvedOutputPath' failed: $($_.Exception.Message). The staging file has been preserved."
+                Write-Error -Message $errMsg -Category WriteError
+                # Prevent finally block from deleting preserved staging file on finalization error
+                $stagingReportPath = $null
+                throw
+            }
         }
 
         # Set final exit code
@@ -2149,7 +2307,15 @@ function Convert-ArchiveToText
         }
         $global:LASTEXITCODE = $exitCode
 
-        Write-Verbose "Report successfully finalized at '$resolvedOutputPath' (ExitCode:$exitCode)."
+        $finalOutputPath = if ($isListOnly -and -not $isSaveReport) { $null } else { $resolvedOutputPath }
+        if ($null -ne $finalOutputPath)
+        {
+            Write-Verbose "Report successfully finalized at '$finalOutputPath' (ExitCode:$exitCode)."
+        }
+        else
+        {
+            Write-Verbose "Archive listing completed in memory (ExitCode:$exitCode)."
+        }
 
         if ($PassThru)
         {
@@ -2158,7 +2324,7 @@ function Convert-ArchiveToText
                 Version = $script:ModuleVersion
                 ArchivePath = $resolvedArchivePath
                 ArchiveFormat = $archiveFormat
-                OutputPath = $resolvedOutputPath
+                OutputPath = $finalOutputPath
                 DiscoveredCount = $totalDiscovered
                 IncludedCount = $textCount
                 SkippedCount = $skippedCount

@@ -1,6 +1,6 @@
 @{
     RootModule = 'ArchiveLens.psm1'
-    ModuleVersion = '0.3.0'
+    ModuleVersion = '0.4.0'
     GUID = '8f9c2d4a-6b1e-4f3a-9c5d-7e2a1b4c8d90'
     Author = 'ArchiveLens Contributors'
     CompanyName = 'Open Source'
@@ -24,7 +24,6 @@
             Tags = @('Archive', 'ZIP', 'RAR', '7Z', 'TAR', 'GZ', 'TGZ', 'BZ2', 'XZ', 'ZST', 'Zstandard', 'LLM', 'Text', 'Flatten', 'Repository', 'UTF8', 'Unicode')
             LicenseUri = 'https://opensource.org/licenses/MIT'
             ProjectUri = 'https://github.com/smabedi/ArchiveLens'
-            ReleaseNotes = 'Release 0.3.0 introduces the built-in Uninstall-ArchiveLens cmdlet, side-by-side semantic versioned module installation (Modules\ArchiveLens\<Version>\), version-aware installation and uninstallation pruning flags (-CleanInstall, -RemoveOlderVersions, -TargetVersion, -RemoveOlderThan, -RemoveOlderThanOrEqualTo), and automatic CLI/PATH cleanup when zero versions remain.'
-        }
+            ReleaseNotes = 'Release 0.4.0 introduces the -ListOnly dry-run mode for memory-efficient archive scanning, the -DeepScan modifier for temporary extraction and strict byte-level binary/encoding classification, and the -SaveReport switch for disk generation without embedding contents.'        }
     }
 }
